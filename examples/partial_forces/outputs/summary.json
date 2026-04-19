@@ -1,0 +1,77 @@
+{
+  "model_name": "NequIP-OAM-L-0.1",
+  "structure": "/nethome/lkong88/workspace/Electrolyte/MatterTune/examples/electrolyte/data/LiH2O.xyz",
+  "device": "cuda:0",
+  "repeats": 1,
+  "warmup": 0,
+  "internal_energy_atol": 1e-08,
+  "internal_force_atol": 0.005,
+  "graph_energy_atol": 0.01,
+  "graph_force_atol": 0.01,
+  "packaged_vs_manual_reference": {
+    "internal_energy_sum_abs_diff_eV": 0.0,
+    "internal_force_sum_abs_diff_eVA": 0.0020990073680877686,
+    "graph_energy_abs_diff_eV": 0.008024154039162568,
+    "graph_force_abs_diff_eVA": 0.004218459129333496
+  },
+  "standard_summary_ms": {
+    "prepare_ms": {
+      "mean": 14.988206326961517,
+      "stdev": 0.0,
+      "min": 14.988206326961517,
+      "max": 14.988206326961517
+    },
+    "backbone_ms": {
+      "mean": 57.12885409593582,
+      "stdev": 0.0,
+      "min": 57.12885409593582,
+      "max": 57.12885409593582
+    },
+    "autograd_ms": {
+      "mean": 233.61999168992043,
+      "stdev": 0.0,
+      "min": 233.61999168992043,
+      "max": 233.61999168992043
+    },
+    "total_ms": {
+      "mean": 305.7530149817467,
+      "stdev": 0.0,
+      "min": 305.7530149817467,
+      "max": 305.7530149817467
+    }
+  },
+  "partial_summary_ms": {
+    "prepare_ms": {
+      "mean": 23.850038647651672,
+      "stdev": 0.0,
+      "min": 23.850038647651672,
+      "max": 23.850038647651672
+    },
+    "backbone_ms": {
+      "mean": 64.62632864713669,
+      "stdev": 0.0,
+      "min": 64.62632864713669,
+      "max": 64.62632864713669
+    },
+    "autograd_ms": {
+      "mean": 42441.38898327947,
+      "stdev": 0.0,
+      "min": 42441.38898327947,
+      "max": 42441.38898327947
+    },
+    "total_ms": {
+      "mean": 42529.90661934018,
+      "stdev": 0.0,
+      "min": 42529.90661934018,
+      "max": 42529.90661934018
+    }
+  },
+  "partial_over_standard_total_ratio": 139.09889530240346,
+  "reference_values": {
+    "standard_total_energy_eV": -952.9331339139461,
+    "partial_total_energy_eV": -952.9255040601595,
+    "per_atom_energy_sum_eV": -952.9255040601595,
+    "standard_max_force_eVA": 1.4815351963043213,
+    "partial_max_partial_force_eVA": 2.775730848312378
+  }
+}

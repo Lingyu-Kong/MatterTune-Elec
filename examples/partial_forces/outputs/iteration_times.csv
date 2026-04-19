@@ -1,0 +1,2 @@
+iteration,standard_prepare_ms,standard_backbone_ms,standard_autograd_ms,standard_total_ms,partial_prepare_ms,partial_backbone_ms,partial_autograd_ms,partial_total_ms
+0,14.988206326961517,57.12885409593582,233.61999168992043,305.7530149817467,23.850038647651672,64.62632864713669,42441.38898327947,42529.90661934018
