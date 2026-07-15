@@ -8,6 +8,7 @@ import nshconfig as C
 import numpy as np
 import torch
 from ase import Atoms
+from ase.calculators.calculator import PropertyNotImplementedError
 from typing_extensions import TypeAliasType, assert_never, override
 
 from .loss import LossConfig
@@ -192,7 +193,14 @@ class ForcesPropertyConfig(PropertyConfigBase):
 
     @override
     def from_ase_atoms(self, atoms):
-        return atoms.get_forces()
+        try:
+            return atoms.get_forces()
+        except PropertyNotImplementedError:
+            if "forces" in atoms.arrays:
+                return np.asarray(atoms.arrays["forces"])
+            if "force" in atoms.arrays:
+                return np.asarray(atoms.arrays["force"])
+            raise
 
     @override
     def ase_calculator_property_name(self):

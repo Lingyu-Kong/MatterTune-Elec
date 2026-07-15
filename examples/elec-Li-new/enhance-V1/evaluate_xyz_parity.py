@@ -133,6 +133,23 @@ def atoms_forces(atoms: Atoms) -> np.ndarray:
         raise
 
 
+def load_per_atom_references(ckpt_path: Path) -> dict[int, float]:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    normalizers = ckpt.get("hyper_parameters", {}).get("normalizers", {})
+    for normalizer in normalizers.get("energy", []):
+        references = normalizer.get("per_atom_references")
+        if references:
+            return {int(atomic_number): float(value) for atomic_number, value in references.items()}
+    return {}
+
+
+def reference_energy(atoms: Atoms, per_atom_references: dict[int, float]) -> float:
+    if not per_atom_references:
+        return 0.0
+    atomic_numbers = np.asarray(atoms.get_atomic_numbers(), dtype=np.int64)
+    return float(sum(per_atom_references.get(int(z), 0.0) for z in atomic_numbers))
+
+
 def predict_batch(model, atoms_batch: list[Atoms], device: torch.device) -> list[dict[str, torch.Tensor]]:
     data_list = [model.atoms_to_data(atoms, has_labels=False) for atoms in atoms_batch]
     batch = model.collate_fn(data_list)
@@ -149,10 +166,22 @@ def append_per_structure_rows(
     natoms: np.ndarray,
     energy_gt: np.ndarray,
     energy_pred: np.ndarray,
+    energy_ref: np.ndarray,
+    reference_subtracted_energy_gt_per_atom: np.ndarray,
+    reference_subtracted_energy_pred_per_atom: np.ndarray,
     energy_error_mev_atom: np.ndarray,
 ) -> None:
-    for offset, (natom, gt, pred, err) in enumerate(
-        zip(natoms, energy_gt, energy_pred, energy_error_mev_atom, strict=True)
+    for offset, (natom, gt, pred, ref, ref_gt, ref_pred, err) in enumerate(
+        zip(
+            natoms,
+            energy_gt,
+            energy_pred,
+            energy_ref,
+            reference_subtracted_energy_gt_per_atom,
+            reference_subtracted_energy_pred_per_atom,
+            energy_error_mev_atom,
+            strict=True,
+        )
     ):
         csv_writer.writerow(
             [
@@ -160,6 +189,9 @@ def append_per_structure_rows(
                 int(natom),
                 f"{gt:.12g}",
                 f"{pred:.12g}",
+                f"{ref:.12g}",
+                f"{ref_gt:.12g}",
+                f"{ref_pred:.12g}",
                 f"{err:.12g}",
             ]
         )
@@ -186,10 +218,12 @@ def save_parity_plot(
     output_path: Path,
     energy_gt: np.ndarray,
     energy_pred: np.ndarray,
+    reference_subtracted_energy_gt_per_atom: np.ndarray,
+    reference_subtracted_energy_pred_per_atom: np.ndarray,
     force_sample: ForceReservoir,
     metrics: dict[str, float | int],
 ) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
     ax = axes[0]
     ax.scatter(energy_gt, energy_pred, s=7, alpha=0.45, rasterized=True)
@@ -203,6 +237,23 @@ def save_parity_plot(
     )
 
     ax = axes[1]
+    ax.scatter(
+        reference_subtracted_energy_gt_per_atom,
+        reference_subtracted_energy_pred_per_atom,
+        s=7,
+        alpha=0.45,
+        rasterized=True,
+    )
+    update_parity_limits(
+        ax,
+        reference_subtracted_energy_gt_per_atom,
+        reference_subtracted_energy_pred_per_atom,
+    )
+    ax.set_xlabel("GT ref-subtracted energy (eV/atom)")
+    ax.set_ylabel("Pred ref-subtracted energy (eV/atom)")
+    ax.set_title("Reference-subtracted energy parity")
+
+    ax = axes[2]
     ax.scatter(force_sample.gt, force_sample.pred, s=1, alpha=0.18, rasterized=True)
     update_parity_limits(ax, force_sample.gt, force_sample.pred)
     ax.set_xlabel("Ground truth force component (eV/A)")
@@ -242,6 +293,7 @@ def main() -> None:
     torch.set_float32_matmul_precision("highest")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Loading checkpoint: {ckpt_path}")
+    per_atom_references = load_per_atom_references(ckpt_path)
     model = load_finetuned_checkpoint(str(ckpt_path), map_location="cpu")
     model.eval()
     model.to_device(device)
@@ -249,11 +301,14 @@ def main() -> None:
     print(f"Using device: {device}")
     print(f"Reading xyz stream: {xyz_path}")
     print(f"Output directory: {output_dir}")
+    print(f"Loaded {len(per_atom_references)} per-atom energy references from checkpoint.")
 
     metrics = RunningMetrics()
     force_sample = ForceReservoir(FORCE_PLOT_MAX_POINTS, RNG_SEED)
     energy_gt_all: list[float] = []
     energy_pred_all: list[float] = []
+    reference_subtracted_energy_gt_per_atom_all: list[float] = []
+    reference_subtracted_energy_pred_per_atom_all: list[float] = []
 
     per_structure_path = output_dir / "per_structure_errors.csv"
     with per_structure_path.open("w", newline="", encoding="utf-8") as handle:
@@ -264,6 +319,9 @@ def main() -> None:
                 "natoms",
                 "energy_gt_eV",
                 "energy_pred_eV",
+                "energy_reference_eV",
+                "reference_subtracted_energy_gt_eV_per_atom",
+                "reference_subtracted_energy_pred_eV_per_atom",
                 "energy_error_meV_per_atom",
             ]
         )
@@ -285,6 +343,9 @@ def main() -> None:
                 force_sample,
                 energy_gt_all,
                 energy_pred_all,
+                reference_subtracted_energy_gt_per_atom_all,
+                reference_subtracted_energy_pred_per_atom_all,
+                per_atom_references,
             )
             pbar.update(len(atoms_batch))
             atoms_batch = []
@@ -302,6 +363,9 @@ def main() -> None:
                 force_sample,
                 energy_gt_all,
                 energy_pred_all,
+                reference_subtracted_energy_gt_per_atom_all,
+                reference_subtracted_energy_pred_per_atom_all,
+                per_atom_references,
             )
             pbar.update(len(atoms_batch))
         pbar.close()
@@ -315,6 +379,7 @@ def main() -> None:
             "prediction_batch_size": PRED_BATCH_SIZE,
             "force_plot_points": int(len(force_sample.gt)),
             "force_components_total": int(force_sample.n_seen),
+            "n_reference_elements": len(per_atom_references),
         }
     )
 
@@ -327,6 +392,8 @@ def main() -> None:
         plot_path,
         np.asarray(energy_gt_all, dtype=np.float64),
         np.asarray(energy_pred_all, dtype=np.float64),
+        np.asarray(reference_subtracted_energy_gt_per_atom_all, dtype=np.float64),
+        np.asarray(reference_subtracted_energy_pred_per_atom_all, dtype=np.float64),
         force_sample,
         metric_dict,
     )
@@ -347,11 +414,18 @@ def evaluate_atoms_batch(
     force_sample: ForceReservoir,
     energy_gt_all: list[float],
     energy_pred_all: list[float],
+    reference_subtracted_energy_gt_per_atom_all: list[float],
+    reference_subtracted_energy_pred_per_atom_all: list[float],
+    per_atom_references: dict[int, float],
 ) -> int:
     predictions = predict_batch(model, atoms_batch, device)
 
     natoms = np.asarray([len(atoms) for atoms in atoms_batch], dtype=np.float64)
     energy_gt = np.asarray([atoms_energy(atoms) for atoms in atoms_batch], dtype=np.float64)
+    energy_ref = np.asarray(
+        [reference_energy(atoms, per_atom_references) for atoms in atoms_batch],
+        dtype=np.float64,
+    )
     force_gt = [atoms_forces(atoms) for atoms in atoms_batch]
     energy_pred = np.asarray(
         [float(pred["energy"].detach().cpu().item()) for pred in predictions],
@@ -362,6 +436,8 @@ def evaluate_atoms_batch(
     ]
 
     energy_error_mev_atom = (energy_pred - energy_gt) / natoms * 1000.0
+    reference_subtracted_energy_gt_per_atom = (energy_gt - energy_ref) / natoms
+    reference_subtracted_energy_pred_per_atom = (energy_pred - energy_ref) / natoms
     metrics.update_energy(energy_error_mev_atom)
     append_per_structure_rows(
         writer,
@@ -369,10 +445,19 @@ def evaluate_atoms_batch(
         natoms,
         energy_gt,
         energy_pred,
+        energy_ref,
+        reference_subtracted_energy_gt_per_atom,
+        reference_subtracted_energy_pred_per_atom,
         energy_error_mev_atom,
     )
     energy_gt_all.extend(energy_gt.tolist())
     energy_pred_all.extend(energy_pred.tolist())
+    reference_subtracted_energy_gt_per_atom_all.extend(
+        reference_subtracted_energy_gt_per_atom.tolist()
+    )
+    reference_subtracted_energy_pred_per_atom_all.extend(
+        reference_subtracted_energy_pred_per_atom.tolist()
+    )
 
     for gt, pred in zip(force_gt, force_pred, strict=True):
         if gt.shape != pred.shape:

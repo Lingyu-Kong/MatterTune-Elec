@@ -8,26 +8,28 @@ Usage:
 
 Purpose:
   Further fine-tune an electrolyte-specialized enhance-V1 checkpoint on
-  Li-electrolyte-Mix XYZ / XYZ_del paired structures.
+  Li-electrolyte-Mix bulk/interface XYZ structures.
 
 Main defaults:
   MIX_DATA_ROOT=/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix
   SOURCE_DATA_ROOT=/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-V1
   SOURCE_VARIANT=with_enhance
   OUTPUT_PREFIX=Li_electrolyte_Mix
-  OUTPUT_ROOT=$MIX_DATA_ROOT/local_runs/mix_further_ft/from_$SOURCE_VARIANT/all_mix
-  INIT_CHECKPOINT=<enhance-V1 best ckpt>
-  TRAIN_FILE=$MIX_DATA_ROOT/train_mlpmd_all.xyz
+  OUTPUT_ROOT=$MIX_DATA_ROOT/local_runs/mix_further_ft/from_$SOURCE_VARIANT/bulk_interface
+  INIT_CHECKPOINT=<20260701 enhance-V1 train_without_delta_e best ckpt>
+  TRAIN_FILES=$MIX_DATA_ROOT/train_mlpmd_bulk.xyz,$MIX_DATA_ROOT/train_mlpmd_interface.xyz
+  TRAIN_FILE=$MIX_DATA_ROOT/train_mlpmd_bulk_interface.xyz
   TEST_FILE=$MIX_DATA_ROOT/${OUTPUT_PREFIX}_all.xyz only used when SKIP_EVAL=0
+  REFIT_REFERENCE=1
   PREPARE_PAIRS=0
   SKIP_EVAL=1
   DELTA_E_LOSS_WEIGHT=0
 
 Training defaults:
   MODEL_TYPE=mattersim-1m
-  DEVICES=0,1,2,3,4,5,6,7
+  DEVICES=0,1,2,3,4,5
   PRECISION=32
-  BATCH_SIZE=8
+  BATCH_SIZE=2
   NUM_WORKERS=4
   LR=8e-5
   WEIGHT_DECAY=0.1
@@ -44,6 +46,8 @@ Useful overrides:
   SOURCE_VARIANT=with_enhance|without_enhance
   DATA_INCLUDE_LABELS=Li_system_lambda0_mix
   TRAIN_FILE=/path/to/train.xyz
+  TRAIN_FILES=/path/to/a.xyz,/path/to/b.xyz
+  REFIT_REFERENCE=0 to reuse an existing Mix reference
   DELTA_E_LOSS_WEIGHT>0 to enable train_with_delta_e
   SKIP_EVAL=0 TEST_FILE=/path/to/independent_mix_test.xyz
 
@@ -53,6 +57,8 @@ Wrapper-only CLI aliases:
   --source_variant NAME
   --source_checkpoint_root PATH
   --source_energy_reference PATH
+  --train_files PATHS
+  --refit_reference 0|1
   --data_scope NAME
   --output_root PATH
 EOF
@@ -118,6 +124,22 @@ while [[ $# -gt 0 ]]; do
       SOURCE_ENERGY_REFERENCE="$2"; shift 2 ;;
     --source_energy_reference=*|--source-energy-reference=*)
       SOURCE_ENERGY_REFERENCE="${1#*=}"; shift ;;
+    --train_file|--train-file)
+      TRAIN_FILE="$2"; shift 2 ;;
+    --train_file=*|--train-file=*)
+      TRAIN_FILE="${1#*=}"; shift ;;
+    --train_files|--train-files)
+      TRAIN_FILES="$2"; shift 2 ;;
+    --train_files=*|--train-files=*)
+      TRAIN_FILES="${1#*=}"; shift ;;
+    --energy_reference|--energy-reference)
+      ENERGY_REFERENCE="$2"; shift 2 ;;
+    --energy_reference=*|--energy-reference=*)
+      ENERGY_REFERENCE="${1#*=}"; shift ;;
+    --refit_reference|--refit-reference)
+      REFIT_REFERENCE="$2"; shift 2 ;;
+    --refit_reference=*|--refit-reference=*)
+      REFIT_REFERENCE="${1#*=}"; shift ;;
     --data_scope|--data-scope)
       DATA_SCOPE="$2"; shift 2 ;;
     --data_scope=*|--data-scope=*)
@@ -165,16 +187,21 @@ esac
 
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-Li_electrolyte_Mix}"
 DATA_INCLUDE_LABELS="${DATA_INCLUDE_LABELS:-}"
+if [[ -z "${TRAIN_FILE+x}" ]]; then
+  TRAIN_FILE_EXPLICIT=0
+else
+  TRAIN_FILE_EXPLICIT=1
+fi
 if [[ -z "${DATA_SCOPE+x}" ]]; then
   if [[ -n "${DATA_INCLUDE_LABELS}" ]]; then
     DATA_SCOPE="$(safe_path_component "${DATA_INCLUDE_LABELS}")"
   else
-    DATA_SCOPE="all_mix"
+    DATA_SCOPE="bulk_interface"
   fi
 fi
 
 SOURCE_CHECKPOINT_ROOT="${SOURCE_CHECKPOINT_ROOT:-${SOURCE_DATA_ROOT}/local_runs/enhance-V1}"
-DEFAULT_INIT_CHECKPOINT="${DEFAULT_INIT_CHECKPOINT:-${SOURCE_DATA_ROOT}/local_runs/enhance-V1/train_without_delta_e/20260604-164626-mattersim-1m-MatterSim-v1p0p0-1M-conservative-train_without_delta_e-ew200p0-fw20p0-dew0p0/checkpoints/mattersim-MatterSim-v1.0.0-1M-conservative-train_without_delta_e-best.ckpt}"
+DEFAULT_INIT_CHECKPOINT="${DEFAULT_INIT_CHECKPOINT:-${SOURCE_DATA_ROOT}/local_runs/enhance-V1/with_enhance/train_without_delta_e/20260701-225958-mattersim-MatterSim-v1p0p0-1M-conservative-train_without_delta_e-ew200p0-fw20p0-dew0p0/checkpoints/mattersim-MatterSim-v1.0.0-1M-conservative-train_without_delta_e-best.ckpt}"
 if [[ -z "${INIT_CHECKPOINT:-}" ]]; then
   if [[ -f "${DEFAULT_INIT_CHECKPOINT}" ]]; then
     INIT_CHECKPOINT="${DEFAULT_INIT_CHECKPOINT}"
@@ -187,17 +214,13 @@ if [[ -z "${INIT_CHECKPOINT:-}" || ! -f "${INIT_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-if [[ -z "${ENERGY_REFERENCE+x}" ]]; then
-  if [[ -n "${SOURCE_ENERGY_REFERENCE:-}" ]]; then
-    ENERGY_REFERENCE="${SOURCE_ENERGY_REFERENCE}"
-  else
-    ENERGY_REFERENCE="$(find_latest_reference "${SOURCE_DATA_ROOT}/references/enhance-V1")"
-  fi
-fi
 REFERENCE_ROOT="${REFERENCE_ROOT:-${MIX_DATA_ROOT}/references/mix_further_ft/from_${SOURCE_VARIANT}/${DATA_SCOPE}}"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-${MIX_DATA_ROOT}/local_runs/mix_further_ft/from_${SOURCE_VARIANT}/${DATA_SCOPE}}"
-TRAIN_FILE="${TRAIN_FILE:-${MIX_DATA_ROOT}/train_mlpmd_all.xyz}"
+TRAIN_FILES="${TRAIN_FILES:-${MIX_DATA_ROOT}/train_mlpmd_bulk.xyz,${MIX_DATA_ROOT}/train_mlpmd_interface.xyz}"
+if [[ "${TRAIN_FILE_EXPLICIT}" == "0" ]]; then
+  TRAIN_FILE="${MIX_DATA_ROOT}/train_mlpmd_bulk_interface.xyz"
+fi
 TEST_FILE="${TEST_FILE:-${MIX_DATA_ROOT}/${OUTPUT_PREFIX}_all.xyz}"
 
 MODEL_TYPE="${MODEL_TYPE:-mattersim-1m}"
@@ -222,11 +245,28 @@ MAX_NUM_NEIGHBORS="${MAX_NUM_NEIGHBORS:-120}"
 if [[ -z "${ORB_EDGE_METHOD+x}" && "${MODEL_TYPE}" == "orb" ]]; then
   ORB_EDGE_METHOD="knn_scipy"
 fi
+REFERENCE_MODEL="${REFERENCE_MODEL:-ridge}"
+RIDGE_ALPHA="${RIDGE_ALPHA:-1.0}"
+RIDGE_ALPHA_LABEL="${RIDGE_ALPHA//./p}"
+MODEL_LABEL="${MODEL_TYPE}-${MODEL_NAME}"
+MODEL_LABEL="${MODEL_LABEL//\//_}"
+MODEL_LABEL="${MODEL_LABEL// /_}"
+if [[ -z "${ENERGY_REFERENCE+x}" && -n "${SOURCE_ENERGY_REFERENCE:-}" ]]; then
+  ENERGY_REFERENCE="${SOURCE_ENERGY_REFERENCE}"
+fi
+ENERGY_REFERENCE="${ENERGY_REFERENCE:-${REFERENCE_ROOT}/${OUTPUT_PREFIX}-${MODEL_LABEL}-${FORCE_MODE}-mix-residual-${REFERENCE_MODEL}-alpha${RIDGE_ALPHA_LABEL}.json}"
+if [[ -z "${REFIT_REFERENCE+x}" ]]; then
+  if [[ -n "${SOURCE_ENERGY_REFERENCE:-}" && "${ENERGY_REFERENCE}" == "${SOURCE_ENERGY_REFERENCE}" ]]; then
+    REFIT_REFERENCE=0
+  else
+    REFIT_REFERENCE=1
+  fi
+fi
 
-DEVICES="${DEVICES:-0,1,2,3,4,5}"
+DEVICES="${DEVICES:-1,2,3}"
 DEVICES_CSV="${DEVICES// /,}"
 PRECISION="${PRECISION:-32}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 REFERENCE_BATCH_SIZE="${REFERENCE_BATCH_SIZE:-${BATCH_SIZE}}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 LR="${LR:-8e-5}"
@@ -255,6 +295,69 @@ GRAD_NORM_LOG_EVERY_N_STEPS="${GRAD_NORM_LOG_EVERY_N_STEPS:-50}"
 NO_PER_ATOM_ENERGY_NORMALIZE="${NO_PER_ATOM_ENERGY_NORMALIZE:-0}"
 PREPARE_PAIRS="${PREPARE_PAIRS:-0}"
 MATCH_TOLERANCE="${MATCH_TOLERANCE:-1e-4}"
+REBUILD_TRAIN_FILE="${REBUILD_TRAIN_FILE:-auto}"
+
+TRAIN_FILE_INPUTS=()
+IFS=',' read -r -a TRAIN_FILE_INPUTS_RAW <<< "${TRAIN_FILES}"
+for train_file_input in "${TRAIN_FILE_INPUTS_RAW[@]}"; do
+  train_file_input="${train_file_input#"${train_file_input%%[![:space:]]*}"}"
+  train_file_input="${train_file_input%"${train_file_input##*[![:space:]]}"}"
+  if [[ -n "${train_file_input}" ]]; then
+    TRAIN_FILE_INPUTS+=("${train_file_input}")
+  fi
+done
+
+if [[ "${TRAIN_FILE_EXPLICIT}" == "0" ]]; then
+  if [[ "${#TRAIN_FILE_INPUTS[@]}" -eq 0 ]]; then
+    echo "TRAIN_FILES did not contain any input files." >&2
+    exit 1
+  elif [[ "${#TRAIN_FILE_INPUTS[@]}" -eq 1 ]]; then
+    TRAIN_FILE="${TRAIN_FILE_INPUTS[0]}"
+  else
+    for train_file_input in "${TRAIN_FILE_INPUTS[@]}"; do
+      if [[ ! -f "${train_file_input}" ]]; then
+        echo "TRAIN_FILES input not found: ${train_file_input}" >&2
+        exit 1
+      fi
+    done
+
+    NEED_REBUILD_TRAIN_FILE=0
+    case "${REBUILD_TRAIN_FILE}" in
+      1|true|TRUE|yes|YES)
+        NEED_REBUILD_TRAIN_FILE=1
+        ;;
+      auto|AUTO)
+        if [[ ! -f "${TRAIN_FILE}" ]]; then
+          NEED_REBUILD_TRAIN_FILE=1
+        else
+          for train_file_input in "${TRAIN_FILE_INPUTS[@]}"; do
+            if [[ "${train_file_input}" -nt "${TRAIN_FILE}" ]]; then
+              NEED_REBUILD_TRAIN_FILE=1
+              break
+            fi
+          done
+        fi
+        ;;
+      0|false|FALSE|no|NO)
+        NEED_REBUILD_TRAIN_FILE=0
+        ;;
+      *)
+        echo "Unsupported REBUILD_TRAIN_FILE=${REBUILD_TRAIN_FILE}; expected auto, 1, or 0." >&2
+        exit 2
+        ;;
+    esac
+
+    if [[ "${NEED_REBUILD_TRAIN_FILE}" == "1" ]]; then
+      mkdir -p "$(dirname "${TRAIN_FILE}")"
+      TMP_TRAIN_FILE="${TRAIN_FILE}.tmp.$$"
+      rm -f "${TMP_TRAIN_FILE}"
+      for train_file_input in "${TRAIN_FILE_INPUTS[@]}"; do
+        cat "${train_file_input}" >> "${TMP_TRAIN_FILE}"
+      done
+      mv "${TMP_TRAIN_FILE}" "${TRAIN_FILE}"
+    fi
+  fi
+fi
 
 export DATA_ROOT="${MIX_DATA_ROOT}"
 export STRUCTURE_DATA_DIR="${MIX_DATA_ROOT}"
@@ -265,6 +368,9 @@ export OUTPUT_ROOT
 export TRAIN_FILE
 export INIT_CHECKPOINT
 export REFERENCE_ROOT
+export REFIT_REFERENCE
+export REFERENCE_MODEL
+export RIDGE_ALPHA
 export TEST_FILE
 
 export MODEL_TYPE
@@ -320,11 +426,15 @@ echo "DATA_INCLUDE_LABELS = ${DATA_INCLUDE_LABELS:-<all mix pairs>}"
 echo "DATA_SCOPE          = ${DATA_SCOPE}"
 echo "OUTPUT_PREFIX       = ${OUTPUT_PREFIX}"
 echo "OUTPUT_ROOT         = ${OUTPUT_ROOT}"
+echo "TRAIN_FILES         = ${TRAIN_FILES}"
 echo "TRAIN_FILE          = ${TRAIN_FILE}"
 echo "TEST_FILE           = ${TEST_FILE}"
 echo "PREPARE_PAIRS       = ${PREPARE_PAIRS}"
 echo "SKIP_EVAL           = ${SKIP_EVAL}"
-echo "ENERGY_REFERENCE    = ${ENERGY_REFERENCE:-<fit mix reference if needed>}"
+echo "REFERENCE_ROOT      = ${REFERENCE_ROOT}"
+echo "ENERGY_REFERENCE    = ${ENERGY_REFERENCE}"
+echo "REFIT_REFERENCE     = ${REFIT_REFERENCE}"
+echo "REBUILD_TRAIN_FILE  = ${REBUILD_TRAIN_FILE}"
 echo "MODEL_TYPE          = ${MODEL_TYPE}"
 echo "MODEL_NAME          = ${MODEL_NAME}"
 echo "FORCE_MODE          = ${FORCE_MODE}"

@@ -789,12 +789,40 @@ def initialize_from_checkpoint(model: Any, checkpoint_path: Path | None) -> None
     state_dict = checkpoint.get("state_dict")
     if state_dict is None:
         raise KeyError(f"Checkpoint has no state_dict: {checkpoint_path}")
-    model.load_state_dict(state_dict, strict=True)
+
+    # init_checkpoint is weight initialization for a new run. Keep the
+    # normalizers from the current config so a newly fitted energy reference is
+    # not overwritten by the source checkpoint's reference buffer.
+    state_dict = dict(state_dict)
+    skipped_normalizer_keys = [
+        key for key in state_dict if key.startswith("normalizers.")
+    ]
+    for key in skipped_normalizer_keys:
+        state_dict.pop(key)
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    unexpected_keys = list(incompatible.unexpected_keys)
+    missing_non_normalizer_keys = [
+        key
+        for key in incompatible.missing_keys
+        if not key.startswith("normalizers.")
+    ]
+    if unexpected_keys or missing_non_normalizer_keys:
+        raise RuntimeError(
+            "Failed to initialize cleanly from checkpoint. "
+            f"unexpected_keys={unexpected_keys}, "
+            f"missing_non_normalizer_keys={missing_non_normalizer_keys}"
+        )
     print(
         "initialized model weights from "
         f"{checkpoint_path} "
         f"(epoch={checkpoint.get('epoch')}, global_step={checkpoint.get('global_step')})"
     )
+    if skipped_normalizer_keys:
+        print(
+            "kept current run normalizers; skipped checkpoint normalizer keys: "
+            f"{', '.join(skipped_normalizer_keys)}"
+        )
 
 
 def fit_enhance(args: argparse.Namespace) -> tuple[Any, Trainer]:
