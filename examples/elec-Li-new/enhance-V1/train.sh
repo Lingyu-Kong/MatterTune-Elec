@@ -91,6 +91,14 @@ apply_cli_overrides() {
       --e_loss_weight=*|--e-loss-weight=*) E_LOSS_WEIGHT="${1#*=}"; shift ;;
       --f_loss_weight|--f-loss-weight) F_LOSS_WEIGHT="$2"; shift 2 ;;
       --f_loss_weight=*|--f-loss-weight=*) F_LOSS_WEIGHT="${1#*=}"; shift ;;
+      --force_training_strategy|--force-training-strategy) FORCE_TRAINING_STRATEGY="$2"; shift 2 ;;
+      --force_training_strategy=*|--force-training-strategy=*) FORCE_TRAINING_STRATEGY="${1#*=}"; shift ;;
+      --force_every_n_steps|--force-every-n-steps) FORCE_EVERY_N_STEPS="$2"; shift 2 ;;
+      --force_every_n_steps=*|--force-every-n-steps=*) FORCE_EVERY_N_STEPS="${1#*=}"; shift ;;
+      --force_subset_key|--force-subset-key) FORCE_SUBSET_KEY="$2"; shift 2 ;;
+      --force_subset_key=*|--force-subset-key=*) FORCE_SUBSET_KEY="${1#*=}"; shift ;;
+      --validation_force_mode|--validation-force-mode) VALIDATION_FORCE_MODE="$2"; shift 2 ;;
+      --validation_force_mode=*|--validation-force-mode=*) VALIDATION_FORCE_MODE="${1#*=}"; shift ;;
       --delta_e_loss_weight|--delta-e-loss-weight) DELTA_E_LOSS_WEIGHT="$2"; shift 2 ;;
       --delta_e_loss_weight=*|--delta-e-loss-weight=*) DELTA_E_LOSS_WEIGHT="${1#*=}"; shift ;;
       --log_loss_grad_norms|--log-loss-grad-norms) LOG_LOSS_GRAD_NORMS=1; shift ;;
@@ -110,6 +118,7 @@ apply_cli_overrides() {
       --wandb_name=*|--wandb-name=*) WANDB_NAME="${1#*=}"; shift ;;
       --wandb_offline|--wandb-offline) WANDB_OFFLINE=1; shift ;;
       --reset_output_heads|--reset-output-heads) RESET_OUTPUT_HEADS=1; shift ;;
+      --freeze_backbone|--freeze-backbone) FREEZE_BACKBONE=1; shift ;;
       --skip_eval|--skip-eval) SKIP_EVAL=1; shift ;;
       --eval_device|--eval-device) EVAL_DEVICE="$2"; shift 2 ;;
       --eval_device=*|--eval-device=*) EVAL_DEVICE="${1#*=}"; shift ;;
@@ -129,6 +138,15 @@ passthrough_unknown_args() {
   PASSTHROUGH_ARGS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --force_training_strategy|--force-training-strategy|--force_every_n_steps|--force-every-n-steps|--force_subset_key|--force-subset-key|--validation_force_mode|--validation-force-mode)
+        shift 2
+        ;;
+      --force_training_strategy=*|--force-training-strategy=*|--force_every_n_steps=*|--force-every-n-steps=*|--force_subset_key=*|--force-subset-key=*|--validation_force_mode=*|--validation-force-mode=*)
+        shift
+        ;;
+      --freeze_backbone|--freeze-backbone)
+        shift
+        ;;
       --model_type|--model-type|--data_variant|--data-variant|--data_include_labels|--data-include-labels|--output_prefix|--output-prefix|--model_name|--model-name|--task_name|--task-name|--force_mode|--force-mode|--graph_radius|--graph-radius|--max_num_neighbors|--max-num-neighbors|--orb_edge_method|--orb-edge-method|--train_file|--train-file|--pair_train_file|--pair-train-file|--test_file|--test-file|--energy_reference|--energy-reference|--init_checkpoint|--init-checkpoint|--resume_checkpoint|--resume-checkpoint|--output_dir|--output-dir|--devices|--precision|--batch_size|--batch-size|--num_workers|--num-workers|--lr|--weight_decay|--weight-decay|--max_epochs|--max-epochs|--train_split|--train-split|--max_parent_frame|--max-parent-frame|--e_loss_weight|--e-loss-weight|--f_loss_weight|--f-loss-weight|--delta_e_loss_weight|--delta-e-loss-weight|--grad_norm_log_every_n_steps|--grad-norm-log-every-n-steps|--monitor|--patience|--lr_patience|--lr-patience|--logger|--wandb_project|--wandb-project|--wandb_name|--wandb-name|--eval_device|--eval-device|--max_eval_structures|--max-eval-structures|--limit_train_batches|--limit-train-batches|--limit_val_batches|--limit-val-batches)
         shift 2
         ;;
@@ -272,7 +290,18 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${DATA_ROOT}/local_runs/enhance-V1/${DATA_VARIANT_DI
 E_LOSS_WEIGHT="${E_LOSS_WEIGHT:-200.0}"
 F_LOSS_WEIGHT="${F_LOSS_WEIGHT:-20.0}"
 DELTA_E_LOSS_WEIGHT="${DELTA_E_LOSS_WEIGHT:-0.0}"
-if float_gt_zero "${DELTA_E_LOSS_WEIGHT}"; then
+FORCE_TRAINING_STRATEGY="${FORCE_TRAINING_STRATEGY:-all}"
+FORCE_EVERY_N_STEPS="${FORCE_EVERY_N_STEPS:-1}"
+FORCE_SUBSET_KEY="${FORCE_SUBSET_KEY:-force_train_mask}"
+VALIDATION_FORCE_MODE="${VALIDATION_FORCE_MODE:-all}"
+FREEZE_BACKBONE="${FREEZE_BACKBONE:-0}"
+if ! float_gt_zero "${F_LOSS_WEIGHT}" || [[ "${FORCE_TRAINING_STRATEGY}" == "none" ]]; then
+  TRAINING_MODE="train_energy_only"
+elif [[ "${FORCE_TRAINING_STRATEGY}" == "every_n" ]]; then
+  TRAINING_MODE="train_sparse_force"
+elif [[ "${FORCE_TRAINING_STRATEGY}" == "subset" ]]; then
+  TRAINING_MODE="train_force_subset"
+elif float_gt_zero "${DELTA_E_LOSS_WEIGHT}"; then
   TRAINING_MODE="train_with_delta_e"
 else
   TRAINING_MODE="train_without_delta_e"
@@ -288,8 +317,17 @@ fi
 MODEL_LABEL="${MODEL_TYPE_LABEL}-${MODEL_NAME}"
 MODEL_LABEL="${MODEL_LABEL//\//_}"
 MODEL_LABEL="${MODEL_LABEL// /_}"
+FORCE_STRATEGY_LABEL="${FORCE_TRAINING_STRATEGY}"
+if [[ "${FORCE_TRAINING_STRATEGY}" == "every_n" ]]; then
+  FORCE_STRATEGY_LABEL="every${FORCE_EVERY_N_STEPS}"
+elif [[ "${FORCE_TRAINING_STRATEGY}" == "subset" ]]; then
+  FORCE_STRATEGY_LABEL="subset_${FORCE_SUBSET_KEY}"
+fi
+if [[ "${FREEZE_BACKBONE}" == "1" ]]; then
+  FORCE_STRATEGY_LABEL="${FORCE_STRATEGY_LABEL}_freeze_backbone"
+fi
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
-RUN_NAME="${RUN_NAME:-${RUN_STAMP}-${MODEL_LABEL}-${FORCE_MODE}-${TRAINING_MODE}-ew${E_LOSS_WEIGHT}-fw${F_LOSS_WEIGHT}-dew${DELTA_E_LOSS_WEIGHT}}"
+RUN_NAME="${RUN_NAME:-${RUN_STAMP}-${MODEL_LABEL}-${FORCE_MODE}-${TRAINING_MODE}-${FORCE_STRATEGY_LABEL}-ew${E_LOSS_WEIGHT}-fw${F_LOSS_WEIGHT}-dew${DELTA_E_LOSS_WEIGHT}}"
 RUN_NAME="${RUN_NAME//./p}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${TRAINING_MODE}/${RUN_NAME}}"
 
@@ -473,6 +511,10 @@ TRAIN_CMD=(
   --max_parent_frame "${MAX_PARENT_FRAME}"
   --e_loss_weight "${E_LOSS_WEIGHT}"
   --f_loss_weight "${F_LOSS_WEIGHT}"
+  --force_training_strategy "${FORCE_TRAINING_STRATEGY}"
+  --force_every_n_steps "${FORCE_EVERY_N_STEPS}"
+  --force_subset_key "${FORCE_SUBSET_KEY}"
+  --validation_force_mode "${VALIDATION_FORCE_MODE}"
   --delta_e_loss_weight "${DELTA_E_LOSS_WEIGHT}"
   --monitor "${MONITOR}"
   --patience "${PATIENCE}"
@@ -496,6 +538,9 @@ if [[ "${WANDB_OFFLINE}" == "1" ]]; then
 fi
 if [[ "${RESET_OUTPUT_HEADS}" == "1" ]]; then
   TRAIN_CMD+=(--reset_output_heads)
+fi
+if [[ "${FREEZE_BACKBONE}" == "1" ]]; then
+  TRAIN_CMD+=(--freeze_backbone)
 fi
 if [[ "${SKIP_EVAL}" == "1" ]]; then
   TRAIN_CMD+=(--skip_eval)
@@ -546,8 +591,14 @@ echo "ORB_EDGE_METHOD     = ${ORB_EDGE_METHOD:-<default>}"
 echo "E_LOSS_WEIGHT       = ${E_LOSS_WEIGHT}"
 echo "F_LOSS_WEIGHT       = ${F_LOSS_WEIGHT}"
 echo "DELTA_E_LOSS_WEIGHT = ${DELTA_E_LOSS_WEIGHT}"
+echo "FORCE_STRATEGY      = ${FORCE_TRAINING_STRATEGY}"
+echo "FORCE_EVERY_N       = ${FORCE_EVERY_N_STEPS}"
+echo "FORCE_SUBSET_KEY    = ${FORCE_SUBSET_KEY}"
+echo "VALIDATION_FORCE    = ${VALIDATION_FORCE_MODE}"
+echo "FREEZE_BACKBONE     = ${FREEZE_BACKBONE}"
 echo "GRAD_NORM_LOGGING   = ${LOG_LOSS_GRAD_NORMS}"
 echo "LOGGER              = ${LOGGER}"
+echo "WANDB_NAME          = ${WANDB_NAME}"
 echo "==========================================================="
 printf ' %q' PYTHONPATH=src "${TRAIN_CMD[@]}"
 echo

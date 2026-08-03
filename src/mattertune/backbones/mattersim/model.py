@@ -327,6 +327,12 @@ class MatterSimM3GNetBackboneModule(
         setattr(graph, self.energy_prop_name, energy)
         setattr(graph, self.forces_prop_name, forces)
         setattr(graph, self.stress_prop_name, stress)
+        if "force_train_mask" in atoms.info:
+            setattr(
+                graph,
+                "force_train_mask",
+                torch.tensor([int(atoms.info["force_train_mask"])], dtype=torch.long),
+            )
         
         if self.hparams.using_partition and "root_node_indices" in atoms.info:
             setattr(graph, "root_indices_mask", torch.tensor(root_indices_mask, dtype=torch.long)) # type: ignore[assignment]

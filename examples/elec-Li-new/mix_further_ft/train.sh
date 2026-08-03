@@ -140,6 +140,24 @@ while [[ $# -gt 0 ]]; do
       REFIT_REFERENCE="$2"; shift 2 ;;
     --refit_reference=*|--refit-reference=*)
       REFIT_REFERENCE="${1#*=}"; shift ;;
+    --force_training_strategy|--force-training-strategy)
+      FORCE_TRAINING_STRATEGY="$2"; shift 2 ;;
+    --force_training_strategy=*|--force-training-strategy=*)
+      FORCE_TRAINING_STRATEGY="${1#*=}"; shift ;;
+    --force_every_n_steps|--force-every-n-steps)
+      FORCE_EVERY_N_STEPS="$2"; shift 2 ;;
+    --force_every_n_steps=*|--force-every-n-steps=*)
+      FORCE_EVERY_N_STEPS="${1#*=}"; shift ;;
+    --force_subset_key|--force-subset-key)
+      FORCE_SUBSET_KEY="$2"; shift 2 ;;
+    --force_subset_key=*|--force-subset-key=*)
+      FORCE_SUBSET_KEY="${1#*=}"; shift ;;
+    --validation_force_mode|--validation-force-mode)
+      VALIDATION_FORCE_MODE="$2"; shift 2 ;;
+    --validation_force_mode=*|--validation-force-mode=*)
+      VALIDATION_FORCE_MODE="${1#*=}"; shift ;;
+    --freeze_backbone|--freeze-backbone)
+      FREEZE_BACKBONE=1; shift ;;
     --data_scope|--data-scope)
       DATA_SCOPE="$2"; shift 2 ;;
     --data_scope=*|--data-scope=*)
@@ -263,7 +281,7 @@ if [[ -z "${REFIT_REFERENCE+x}" ]]; then
   fi
 fi
 
-DEVICES="${DEVICES:-1,2,3}"
+DEVICES="${DEVICES:-2,5,6,7}"
 DEVICES_CSV="${DEVICES// /,}"
 PRECISION="${PRECISION:-32}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -277,6 +295,11 @@ MAX_PARENT_FRAME="${MAX_PARENT_FRAME:--1}"
 E_LOSS_WEIGHT="${E_LOSS_WEIGHT:-200.0}"
 F_LOSS_WEIGHT="${F_LOSS_WEIGHT:-20.0}"
 DELTA_E_LOSS_WEIGHT="${DELTA_E_LOSS_WEIGHT:-0}"
+FORCE_TRAINING_STRATEGY="${FORCE_TRAINING_STRATEGY:-all}"
+FORCE_EVERY_N_STEPS="${FORCE_EVERY_N_STEPS:-1}"
+FORCE_SUBSET_KEY="${FORCE_SUBSET_KEY:-force_train_mask}"
+VALIDATION_FORCE_MODE="${VALIDATION_FORCE_MODE:-all}"
+FREEZE_BACKBONE="${FREEZE_BACKBONE:-0}"
 MONITOR="${MONITOR:-val/total_loss}"
 PATIENCE="${PATIENCE:-100}"
 LR_PATIENCE="${LR_PATIENCE:-5}"
@@ -395,6 +418,11 @@ export MAX_PARENT_FRAME
 export E_LOSS_WEIGHT
 export F_LOSS_WEIGHT
 export DELTA_E_LOSS_WEIGHT
+export FORCE_TRAINING_STRATEGY
+export FORCE_EVERY_N_STEPS
+export FORCE_SUBSET_KEY
+export VALIDATION_FORCE_MODE
+export FREEZE_BACKBONE
 export MONITOR
 export PATIENCE
 export LR_PATIENCE
@@ -446,7 +474,13 @@ echo "MAX_EPOCHS          = ${MAX_EPOCHS}"
 echo "E_LOSS_WEIGHT       = ${E_LOSS_WEIGHT}"
 echo "F_LOSS_WEIGHT       = ${F_LOSS_WEIGHT}"
 echo "DELTA_E_LOSS_WEIGHT = ${DELTA_E_LOSS_WEIGHT}"
+echo "FORCE_STRATEGY      = ${FORCE_TRAINING_STRATEGY}"
+echo "FORCE_EVERY_N       = ${FORCE_EVERY_N_STEPS}"
+echo "FORCE_SUBSET_KEY    = ${FORCE_SUBSET_KEY}"
+echo "VALIDATION_FORCE    = ${VALIDATION_FORCE_MODE}"
+echo "FREEZE_BACKBONE     = ${FREEZE_BACKBONE}"
 echo "LOGGER              = ${LOGGER}"
+echo "WANDB_NAME          = ${WANDB_NAME:-<inner run name>}"
 echo "==============================================================="
 
 bash "${ENHANCE_TRAIN_SH}" "${INNER_ARGS[@]}"

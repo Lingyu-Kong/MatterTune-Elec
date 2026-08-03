@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib
 import json
 from collections.abc import Iterator
 from datetime import datetime
@@ -13,6 +15,7 @@ import numpy as np
 import rich
 import torch
 from ase import Atoms
+from ase.calculators.calculator import PropertyNotImplementedError
 from ase.io import read
 from lightning.pytorch import LightningDataModule, Trainer
 from rich.progress import track
@@ -40,8 +43,50 @@ MODEL_TYPES = ("mattersim", "orb", "uma")
 FORCE_MODES = ("direct", "conservative")
 TRAIN_WITH_DELTA_E = "train_with_delta_e"
 TRAIN_WITHOUT_DELTA_E = "train_without_delta_e"
+TRAIN_ENERGY_ONLY = "train_energy_only"
+TRAIN_SPARSE_FORCE = "train_sparse_force"
+TRAIN_FORCE_SUBSET = "train_force_subset"
+FORCE_TRAINING_STRATEGIES = ("all", "none", "every_n", "subset")
+VALIDATION_FORCE_MODES = ("all", "energy_only", "match_train")
 PAIR_ID_KEYS = ("delta_pair_id", "lambda_pair_id", "pair_id")
 PAIR_ROLE_KEYS = ("delta_pair_role", "lambda_pair_role", "pair_role")
+
+
+def patch_lightning_cuda_matmul_precision_check() -> None:
+    """Keep Lightning's TF32 hint check compatible with PyTorch 2.12 backend APIs."""
+
+    def wrap_check(original: Any) -> Any:
+        def safe_check(device: torch.device) -> None:
+            try:
+                original(device)
+            except RuntimeError as exc:
+                message = str(exc)
+                if (
+                    "mix of the legacy and new APIs" in message
+                    and "matmul precision" in message
+                ):
+                    return
+                raise
+
+        return safe_check
+
+    for module_name in (
+        "lightning.fabric.accelerators.cuda",
+        "lightning.pytorch.accelerators.cuda",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        original = getattr(module, "_check_cuda_matmul_precision", None)
+        if original is None or getattr(original, "_mattertune_wrapped", False):
+            continue
+        safe_check = wrap_check(original)
+        safe_check._mattertune_wrapped = True
+        setattr(module, "_check_cuda_matmul_precision", safe_check)
+
+
+patch_lightning_cuda_matmul_precision_check()
 
 
 def normalize_model_type(raw: str) -> str:
@@ -139,16 +184,22 @@ def _json_sanitize(obj: object) -> object:
     return str(obj)
 
 
+def trains_with_forces(args: argparse.Namespace) -> bool:
+    return args.force_training_strategy != "none" and args.f_loss_weight > 0.0
+
+
 def supervision_mode(args: argparse.Namespace) -> str:
-    if args.e_loss_weight > 0.0 and args.f_loss_weight > 0.0:
-        if args.delta_e_loss_weight > 0.0:
-            return TRAIN_WITH_DELTA_E
-        return TRAIN_WITHOUT_DELTA_E
-    raise ValueError(
-        "Supported enhance-V1 modes require --e_loss_weight > 0 and "
-        "--f_loss_weight > 0. Use --delta_e_loss_weight <= 0 for energy/force "
-        "training, or > 0 for energy/force/delta-E pair training."
-    )
+    if args.e_loss_weight <= 0.0:
+        raise ValueError("--e_loss_weight must be > 0 for enhance-V1 training.")
+    if not trains_with_forces(args):
+        return TRAIN_ENERGY_ONLY
+    if args.force_training_strategy == "every_n":
+        return TRAIN_SPARSE_FORCE
+    if args.force_training_strategy == "subset":
+        return TRAIN_FORCE_SUBSET
+    if args.delta_e_loss_weight > 0.0:
+        return TRAIN_WITH_DELTA_E
+    return TRAIN_WITHOUT_DELTA_E
 
 
 def validate_supervision_args(args: argparse.Namespace) -> None:
@@ -158,6 +209,10 @@ def validate_supervision_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 "Delta-E pair training requires --batch_size >= 2 and an even batch size."
             )
+    if args.delta_e_loss_weight > 0.0 and args.force_training_strategy != "all":
+        raise ValueError("Delta-E training is only supported with --force_training_strategy all.")
+    if args.force_every_n_steps < 1:
+        raise ValueError("--force_every_n_steps must be >= 1.")
     if args.model_type == "mattersim" and args.force_mode != "conservative":
         raise ValueError("MatterSim only supports conservative forces in MatterTune.")
 
@@ -192,7 +247,7 @@ def build_config(args: argparse.Namespace):
     else:
         raise ValueError(f"Unsupported model_type: {args.model_type}")
     hparams.model.ignore_gpu_batch_transform_error = True
-    hparams.model.freeze_backbone = False
+    hparams.model.freeze_backbone = args.freeze_backbone
     hparams.model.reset_output_heads = args.reset_output_heads
 
     hparams.model.optimizer = MC.AdamWConfig(
@@ -210,17 +265,21 @@ def build_config(args: argparse.Namespace):
         min_lr=1e-8,
     )
 
-    hparams.model.properties = [
+    properties = [
         MC.EnergyPropertyConfig(
             loss=MC.MSELossConfig(),
             loss_coefficient=args.e_loss_weight,
-        ),
-        MC.ForcesPropertyConfig(
-            loss=MC.MSELossConfig(),
-            loss_coefficient=args.f_loss_weight,
-            conservative=args.force_mode == "conservative",
-        ),
+        )
     ]
+    if trains_with_forces(args):
+        properties.append(
+            MC.ForcesPropertyConfig(
+                loss=MC.MSELossConfig(),
+                loss_coefficient=args.f_loss_weight,
+                conservative=args.force_mode == "conservative",
+            )
+        )
+    hparams.model.properties = properties
 
     hparams.data = MC.AutoSplitDataModuleConfig.draft()
     hparams.data.dataset = MC.XYZDatasetConfig.draft()
@@ -636,12 +695,161 @@ def log_component_grad_norms(
         )
 
 
+def force_property_names(module: Any) -> set[str]:
+    return {
+        prop.name
+        for prop in getattr(module.hparams, "properties", [])
+        if isinstance(prop, MC.ForcesPropertyConfig)
+    }
+
+
+def active_property_names(
+    module: Any,
+    *,
+    force_active: bool,
+) -> set[str]:
+    force_names = force_property_names(module)
+    return {
+        prop.name
+        for prop in getattr(module.hparams, "properties", [])
+        if prop.name not in force_names or force_active
+    }
+
+
+def subset_force_mask(batch: Any, key: str) -> torch.Tensor | None:
+    mask = getattr(batch, key, None)
+    if mask is None and isinstance(batch, dict):
+        mask = batch.get(key)
+    if mask is None:
+        return None
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.as_tensor(mask)
+    return mask.reshape(-1).bool()
+
+
+def batch_has_subset_forces(batch: Any, key: str) -> bool:
+    mask = subset_force_mask(batch, key)
+    if mask is None:
+        return False
+    return bool(mask.any().item())
+
+
+def force_active_for_step(module: Any, batch: Any, mode: str) -> bool:
+    if not force_property_names(module):
+        return False
+
+    strategy = str(getattr(module, "_enhance_force_training_strategy", "all"))
+    validation_mode = str(getattr(module, "_enhance_validation_force_mode", "all"))
+
+    if mode != "train":
+        if validation_mode == "all":
+            return True
+        if validation_mode == "energy_only":
+            return False
+        if validation_mode == "match_train":
+            if strategy == "all":
+                return True
+            if strategy == "none":
+                return False
+            if strategy == "subset":
+                key = str(getattr(module, "_enhance_force_subset_key", "force_train_mask"))
+                return batch_has_subset_forces(batch, key)
+            return False
+        raise ValueError(f"Unsupported validation force mode: {validation_mode}")
+
+    if strategy == "all":
+        return True
+    if strategy == "none":
+        return False
+    if strategy == "every_n":
+        interval = max(1, int(getattr(module, "_enhance_force_every_n_steps", 1)))
+        trainer = getattr(module, "trainer", None)
+        global_step = int(getattr(trainer, "global_step", 0))
+        return global_step % interval == 0
+    if strategy == "subset":
+        key = str(getattr(module, "_enhance_force_subset_key", "force_train_mask"))
+        return batch_has_subset_forces(batch, key)
+    raise ValueError(f"Unsupported force training strategy: {strategy}")
+
+
+@contextlib.contextmanager
+def temporary_force_outputs(module: Any, enabled: bool):
+    if not hasattr(module, "calc_forces"):
+        yield
+        return
+    original = bool(getattr(module, "calc_forces"))
+    setattr(module, "calc_forces", bool(enabled))
+    try:
+        yield
+    finally:
+        setattr(module, "calc_forces", original)
+
+
+def maybe_mask_force_loss(
+    batch: Any,
+    prop_name: str,
+    force_names: set[str],
+    prediction: torch.Tensor,
+    label: torch.Tensor,
+    subset_key: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if prop_name not in force_names:
+        return prediction, label
+    graph_mask = subset_force_mask(batch, subset_key)
+    if graph_mask is None:
+        return prediction, label
+    if not hasattr(batch, "batch"):
+        if graph_mask.numel() == 1 and bool(graph_mask.item()):
+            return prediction, label
+        empty = prediction[:0]
+        return empty, label[:0]
+    atom_graph_index = getattr(batch, "batch")
+    atom_mask = graph_mask.to(atom_graph_index.device)[atom_graph_index]
+    return prediction[atom_mask], label[atom_mask]
+
+
+def log_active_metrics(
+    module: Any,
+    *,
+    mode: str,
+    metrics: Any | None,
+    predictions: dict[str, torch.Tensor],
+    labels: dict[str, torch.Tensor],
+    active_names: set[str],
+    batch_size: int | None,
+) -> None:
+    if metrics is None:
+        return
+    metric_values: dict[str, Any] = {}
+    metric_prefix = str(getattr(metrics, "metric_prefix", ""))
+    for metric_module in getattr(metrics, "metric_modules", []):
+        prop_name = str(getattr(metric_module, "property_name", ""))
+        if prop_name not in active_names:
+            continue
+        if prop_name not in predictions or prop_name not in labels:
+            continue
+        for metric_name, metric in metric_module(predictions, labels).items():
+            metric_values[f"{mode}/{metric_prefix}{metric_name}"] = metric
+    if metric_values:
+        sync_dist = bool(getattr(getattr(module, "trainer", None), "world_size", 1) > 1)
+        module.log_dict(
+            metric_values,
+            on_epoch=True,
+            sync_dist=sync_dist,
+            batch_size=batch_size,
+        )
+
+
 def attach_enhanced_loss(
     module: Any,
     *,
     delta_e_loss_weight: float,
     log_loss_grad_norms: bool,
     grad_norm_log_every_n_steps: int,
+    force_training_strategy: str,
+    force_every_n_steps: int,
+    force_subset_key: str,
+    validation_force_mode: str,
 ) -> None:
     def _common_step_enhanced(
         self: Any,
@@ -658,8 +866,12 @@ def attach_enhanced_loss(
             if isinstance(energy_label, torch.Tensor) and energy_label.ndim > 0
             else None
         )
+        force_names = force_property_names(self)
+        force_active = force_active_for_step(self, batch, mode)
+        active_names = active_property_names(self, force_active=force_active)
         try:
-            output = self(batch, mode=mode)
+            with temporary_force_outputs(self, force_active):
+                output = self(batch, mode=mode)
         except _SkipBatchError:
             return {"predicted_properties": {}}, _zero_loss(self)
 
@@ -675,7 +887,26 @@ def attach_enhanced_loss(
         losses: list[torch.Tensor] = []
         component_losses: dict[str, torch.Tensor] = {}
         for prop in self.hparams.properties:
-            loss = compute_loss(prop.loss, predictions[prop.name], labels[prop.name])
+            if prop.name not in active_names:
+                continue
+            prediction = predictions[prop.name]
+            label = labels[prop.name]
+            if (
+                prop.name in force_names
+                and str(getattr(self, "_enhance_force_training_strategy", "all")) == "subset"
+            ):
+                subset_key = str(getattr(self, "_enhance_force_subset_key", "force_train_mask"))
+                prediction, label = maybe_mask_force_loss(
+                    batch,
+                    prop.name,
+                    force_names,
+                    prediction,
+                    label,
+                    subset_key,
+                )
+                if prediction.numel() == 0:
+                    continue
+            loss = compute_loss(prop.loss, prediction, label)
             weighted_loss = loss * prop.loss_coefficient
             losses.append(weighted_loss)
             component_losses[prop.name] = weighted_loss
@@ -746,6 +977,15 @@ def attach_enhanced_loss(
 
         total_loss = sum(losses)
         if log:
+            if force_names:
+                self.log(
+                    f"{mode}/force_active",
+                    float(force_active),
+                    on_step=mode == "train",
+                    on_epoch=mode != "train",
+                    sync_dist=sync_dist,
+                    batch_size=log_batch_size,
+                )
             log_component_grad_norms(
                 self,
                 mode=mode,
@@ -761,13 +1001,13 @@ def attach_enhanced_loss(
             )
 
         if log and metrics is not None:
-            self.log_dict(
-                {
-                    f"{mode}/{metric_name}": metric
-                    for metric_name, metric in metrics(denorm_predictions, denorm_labels).items()
-                },
-                on_epoch=True,
-                sync_dist=True,
+            log_active_metrics(
+                self,
+                mode=mode,
+                metrics=metrics,
+                predictions=denorm_predictions,
+                labels=denorm_labels,
+                active_names=active_names,
                 batch_size=log_batch_size,
             )
 
@@ -775,6 +1015,10 @@ def attach_enhanced_loss(
 
     module._enhance_log_loss_grad_norms = log_loss_grad_norms
     module._enhance_grad_norm_log_every_n_steps = grad_norm_log_every_n_steps
+    module._enhance_force_training_strategy = force_training_strategy
+    module._enhance_force_every_n_steps = force_every_n_steps
+    module._enhance_force_subset_key = force_subset_key
+    module._enhance_validation_force_mode = validation_force_mode
     module._common_step = MethodType(_common_step_enhanced, module)
 
 
@@ -831,12 +1075,20 @@ def fit_enhance(args: argparse.Namespace) -> tuple[Any, Trainer]:
     model = config.model.create_model()
     initialize_from_checkpoint(model, args.init_checkpoint)
 
-    if args.training_mode == TRAIN_WITH_DELTA_E or args.log_loss_grad_norms:
+    needs_dynamic_force_step = (
+        args.force_training_strategy in {"every_n", "subset"}
+        or args.validation_force_mode != "all"
+    )
+    if args.training_mode == TRAIN_WITH_DELTA_E or args.log_loss_grad_norms or needs_dynamic_force_step:
         attach_enhanced_loss(
             model,
             delta_e_loss_weight=args.delta_e_loss_weight if args.training_mode == TRAIN_WITH_DELTA_E else 0.0,
             log_loss_grad_norms=args.log_loss_grad_norms,
             grad_norm_log_every_n_steps=args.grad_norm_log_every_n_steps,
+            force_training_strategy=args.force_training_strategy,
+            force_every_n_steps=args.force_every_n_steps,
+            force_subset_key=args.force_subset_key,
+            validation_force_mode=args.validation_force_mode,
         )
 
     if args.training_mode == TRAIN_WITH_DELTA_E:
@@ -877,6 +1129,17 @@ def structure_group(atoms: Atoms) -> str:
     return "without_del" if "config_type" in atoms.info else "with_del"
 
 
+def forces_from_atoms(atoms: Atoms) -> np.ndarray:
+    try:
+        return np.asarray(atoms.get_forces(), dtype=np.float64)
+    except PropertyNotImplementedError:
+        if "forces" in atoms.arrays:
+            return np.asarray(atoms.arrays["forces"], dtype=np.float64)
+        if "force" in atoms.arrays:
+            return np.asarray(atoms.arrays["force"], dtype=np.float64)
+        raise
+
+
 def summarize_errors(
     *,
     energy_gt: np.ndarray,
@@ -898,23 +1161,27 @@ def summarize_errors(
 
         e_err = energy_pred[idx] - energy_gt[idx]
         epa_err = energy_pred[idx] / natoms[idx] - energy_gt[idx] / natoms[idx]
-        f_gt = np.vstack([forces_gt[i] for i in idx])
-        f_pred = np.vstack([forces_pred[i] for i in idx])
-        f_err = f_pred - f_gt
-
         metrics[group_name] = {
             "n_structures": int(len(idx)),
-            "n_force_components": int(f_err.size),
             "energy_mae_eV": float(np.mean(np.abs(e_err))),
             "energy_rmse_eV": float(np.sqrt(np.mean(e_err**2))),
             "energy_bias_eV": float(np.mean(e_err)),
             "energy_per_atom_mae_eV": float(np.mean(np.abs(epa_err))),
             "energy_per_atom_rmse_eV": float(np.sqrt(np.mean(epa_err**2))),
             "energy_per_atom_bias_eV": float(np.mean(epa_err)),
-            "force_component_mae_eV_A": float(np.mean(np.abs(f_err))),
-            "force_component_rmse_eV_A": float(np.sqrt(np.mean(f_err**2))),
-            "force_component_bias_eV_A": float(np.mean(f_err)),
         }
+        if forces_gt and forces_pred:
+            f_gt = np.vstack([forces_gt[i] for i in idx])
+            f_pred = np.vstack([forces_pred[i] for i in idx])
+            f_err = f_pred - f_gt
+            metrics[group_name].update(
+                {
+                    "n_force_components": int(f_err.size),
+                    "force_component_mae_eV_A": float(np.mean(np.abs(f_err))),
+                    "force_component_rmse_eV_A": float(np.sqrt(np.mean(f_err**2))),
+                    "force_component_bias_eV_A": float(np.mean(f_err)),
+                }
+            )
     return metrics
 
 
@@ -928,16 +1195,18 @@ def save_parity_plot(
     max_force_points: int,
     seed: int,
 ) -> None:
-    f_gt = np.vstack(forces_gt).reshape(-1)
-    f_pred = np.vstack(forces_pred).reshape(-1)
-    if f_gt.size > max_force_points:
-        rng = np.random.default_rng(seed)
-        choice = rng.choice(f_gt.size, size=max_force_points, replace=False)
-        f_gt = f_gt[choice]
-        f_pred = f_pred[choice]
+    has_forces = bool(forces_gt and forces_pred)
+    if has_forces:
+        f_gt = np.vstack(forces_gt).reshape(-1)
+        f_pred = np.vstack(forces_pred).reshape(-1)
+        if f_gt.size > max_force_points:
+            rng = np.random.default_rng(seed)
+            choice = rng.choice(f_gt.size, size=max_force_points, replace=False)
+            f_gt = f_gt[choice]
+            f_pred = f_pred[choice]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-    ax = axes[0]
+    fig, axes = plt.subplots(1, 2 if has_forces else 1, figsize=(10, 5))
+    ax = axes[0] if has_forces else axes
     ax.scatter(energy_gt, energy_pred, s=8, alpha=0.55)
     emin = min(float(energy_gt.min()), float(energy_pred.min()))
     emax = max(float(energy_gt.max()), float(energy_pred.max()))
@@ -949,17 +1218,18 @@ def save_parity_plot(
     ax.set_title("Energy")
     ax.set_aspect("equal", adjustable="box")
 
-    ax = axes[1]
-    ax.scatter(f_gt, f_pred, s=1, alpha=0.25)
-    fmin = min(float(f_gt.min()), float(f_pred.min()))
-    fmax = max(float(f_gt.max()), float(f_pred.max()))
-    ax.plot([fmin, fmax], [fmin, fmax], color="k", linewidth=1.0)
-    ax.set_xlim(fmin, fmax)
-    ax.set_ylim(fmin, fmax)
-    ax.set_xlabel("DFT force (eV/A)")
-    ax.set_ylabel("MLIP force (eV/A)")
-    ax.set_title("Force components")
-    ax.set_aspect("equal", adjustable="box")
+    if has_forces:
+        ax = axes[1]
+        ax.scatter(f_gt, f_pred, s=1, alpha=0.25)
+        fmin = min(float(f_gt.min()), float(f_pred.min()))
+        fmax = max(float(f_gt.max()), float(f_pred.max()))
+        ax.plot([fmin, fmax], [fmin, fmax], color="k", linewidth=1.0)
+        ax.set_xlim(fmin, fmax)
+        ax.set_ylim(fmin, fmax)
+        ax.set_xlabel("DFT force (eV/A)")
+        ax.set_ylabel("MLIP force (eV/A)")
+        ax.set_title("Force components")
+        ax.set_aspect("equal", adjustable="box")
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -971,6 +1241,7 @@ def evaluate_checkpoint(args: argparse.Namespace, ckpt_path: str | Path) -> dict
     model = load_finetuned_checkpoint(str(ckpt_path))
     eval_device = args.eval_device or f"cuda:{args.devices[0]}"
     calc = model.ase_calculator(device=eval_device)
+    eval_forces = "forces" in getattr(calc, "implemented_properties", [])
 
     atoms_list: list[Atoms] = read(args.test_file, index=":")  # type: ignore[assignment]
     if args.max_eval_structures is not None:
@@ -985,16 +1256,15 @@ def evaluate_checkpoint(args: argparse.Namespace, ckpt_path: str | Path) -> dict
 
     for atoms in track(atoms_list, description="Evaluating test set"):
         gt_e = float(atoms.get_potential_energy())
-        gt_f = np.asarray(atoms.get_forces(), dtype=np.float64)
         atoms_for_pred = atoms.copy()
         atoms_for_pred.calc = calc
         pred_e = float(atoms_for_pred.get_potential_energy())
-        pred_f = np.asarray(atoms_for_pred.get_forces(), dtype=np.float64)
 
         energy_gt.append(gt_e)
         energy_pred.append(pred_e)
-        forces_gt.append(gt_f)
-        forces_pred.append(pred_f)
+        if eval_forces:
+            forces_gt.append(forces_from_atoms(atoms))
+            forces_pred.append(np.asarray(atoms_for_pred.get_forces(), dtype=np.float64))
         natoms.append(len(atoms))
         groups.append(structure_group(atoms))
 
@@ -1111,6 +1381,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--e_loss_weight", type=float, default=200.0)
     parser.add_argument("--f_loss_weight", type=float, default=20.0)
     parser.add_argument(
+        "--force_training_strategy",
+        choices=FORCE_TRAINING_STRATEGIES,
+        default="all",
+        help=(
+            "all: train forces every step; none: energy-only; every_n: train "
+            "forces every --force_every_n_steps training steps; subset: train "
+            "forces only for structures marked by --force_subset_key."
+        ),
+    )
+    parser.add_argument(
+        "--force_every_n_steps",
+        type=int,
+        default=1,
+        help="For --force_training_strategy every_n, train forces on steps divisible by this value.",
+    )
+    parser.add_argument(
+        "--force_subset_key",
+        default="force_train_mask",
+        help="Atoms.info/graph attribute used by --force_training_strategy subset.",
+    )
+    parser.add_argument(
+        "--validation_force_mode",
+        choices=VALIDATION_FORCE_MODES,
+        default="all",
+        help="Whether validation/test computes force predictions when the model has a force property.",
+    )
+    parser.add_argument(
         "--delta_e_loss_weight",
         type=float,
         default=0.0,
@@ -1158,6 +1455,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--freeze_backbone",
+        action="store_true",
+        help="Freeze backbone parameters and train only backbone-defined final/head parameters.",
+    )
+    parser.add_argument(
         "--no_per_atom_energy_normalize",
         action="store_true",
         help="Disable energy loss normalization by number of atoms.",
@@ -1181,6 +1483,14 @@ def parse_args() -> argparse.Namespace:
         f"{args.training_mode}-ew{safe_float_label(args.e_loss_weight)}-"
         f"fw{safe_float_label(args.f_loss_weight)}-dew{safe_float_label(args.delta_e_loss_weight)}"
     )
+    if args.force_training_strategy == "every_n":
+        mode_suffix += f"-force_every{args.force_every_n_steps}"
+    elif args.force_training_strategy == "subset":
+        mode_suffix += f"-force_subset_{args.force_subset_key}"
+    if args.freeze_backbone:
+        mode_suffix += "-freeze_backbone"
+    if args.validation_force_mode != "all":
+        mode_suffix += f"-val_{args.validation_force_mode}"
     run_name = args.wandb_name or (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
         f"{experiment_label(args)}-{mode_suffix}"
