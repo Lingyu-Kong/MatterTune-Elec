@@ -1,0 +1,14 @@
+optimizer:
+  name: muon
+  lr: 8.0e-5
+  weight_decay: 0.1
+  muon_momentum: 0.95
+  muon_nesterov: true
+  muon_ns_steps: 5
+  muon_adjust_lr_fn: match_rms_adamw
+  muon_aux_lr: null
+  muon_aux_weight_decay: null
+  muon_exclude_patterns:
+    - "*embed*"
+    - "*lm_head*"
+    - "*output_head*"

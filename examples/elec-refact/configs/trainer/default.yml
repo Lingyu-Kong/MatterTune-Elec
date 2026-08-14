@@ -1,0 +1,12 @@
+trainer:
+  accelerator: gpu
+  devices: [0]
+  strategy: null
+  precision: "32"
+  max_epochs: 5000
+  gradient_clip_val: 2.0
+  ema_decay: 0.99
+  early_stopping_patience: 100
+  early_stopping_min_delta: 1.0e-5
+  limit_train_batches: null
+  limit_val_batches: null

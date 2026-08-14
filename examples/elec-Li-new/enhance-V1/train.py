@@ -40,6 +40,7 @@ DEFAULT_TEST_FILE = TEST_DATA_ROOT / "Li_system_test_with_del.xyz"
 DEFAULT_OUTPUT_ROOT = DATA_ROOT / "local_runs" / "enhance-V1"
 DEFAULT_INIT_CHECKPOINT: Path | None = None
 MODEL_TYPES = ("mattersim", "orb", "uma")
+OPTIMIZERS = ("adam", "adamw", "muon")
 FORCE_MODES = ("direct", "conservative")
 TRAIN_WITH_DELTA_E = "train_with_delta_e"
 TRAIN_WITHOUT_DELTA_E = "train_without_delta_e"
@@ -215,6 +216,10 @@ def validate_supervision_args(args: argparse.Namespace) -> None:
         raise ValueError("--force_every_n_steps must be >= 1.")
     if args.model_type == "mattersim" and args.force_mode != "conservative":
         raise ValueError("MatterSim only supports conservative forces in MatterTune.")
+    if args.optimizer == "muon" and args.model_type != "mattersim":
+        raise ValueError(
+            "Muon training is currently supported only for the MatterSim backbone."
+        )
 
 
 def build_config(args: argparse.Namespace):
@@ -250,19 +255,45 @@ def build_config(args: argparse.Namespace):
     hparams.model.freeze_backbone = args.freeze_backbone
     hparams.model.reset_output_heads = args.reset_output_heads
 
-    hparams.model.optimizer = MC.AdamWConfig(
-        lr=args.lr,
-        amsgrad=False,
-        betas=(0.9, 0.95),
-        eps=1.0e-8,
-        weight_decay=args.weight_decay,
-    )
+    if args.optimizer == "adam":
+        hparams.model.optimizer = MC.AdamConfig(
+            lr=args.lr,
+            amsgrad=getattr(args, "adam_amsgrad", False),
+            betas=getattr(args, "adam_betas", (0.9, 0.95)),
+            eps=getattr(args, "adam_eps", 1.0e-8),
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "adamw":
+        hparams.model.optimizer = MC.AdamWConfig(
+            lr=args.lr,
+            amsgrad=getattr(args, "adam_amsgrad", False),
+            betas=getattr(args, "adam_betas", (0.9, 0.95)),
+            eps=getattr(args, "adam_eps", 1.0e-8),
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "muon":
+        muon_kwargs: dict[str, Any] = {}
+        if args.muon_exclude_pattern is not None:
+            muon_kwargs["exclude_patterns"] = tuple(args.muon_exclude_pattern)
+        hparams.model.optimizer = MC.MuonConfig(
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=args.muon_momentum,
+            nesterov=not args.muon_no_nesterov,
+            ns_steps=args.muon_ns_steps,
+            adjust_lr_fn=args.muon_adjust_lr_fn,
+            adamw_lr=args.muon_aux_lr,
+            adamw_weight_decay=args.muon_aux_weight_decay,
+            **muon_kwargs,
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
     hparams.model.lr_scheduler = MC.ReduceOnPlateauConfig(
-        mode="min",
+        mode=getattr(args, "lr_mode", "min"),
         monitor=args.monitor,
-        factor=0.8,
+        factor=getattr(args, "lr_factor", 0.8),
         patience=args.lr_patience,
-        min_lr=1e-8,
+        min_lr=getattr(args, "min_lr", 1e-8),
     )
 
     properties = [
@@ -285,10 +316,10 @@ def build_config(args: argparse.Namespace):
     hparams.data.dataset = MC.XYZDatasetConfig.draft()
     hparams.data.dataset.src = str(args.train_file)
     hparams.data.train_split = args.train_split
-    hparams.data.shuffle = True
+    hparams.data.shuffle = getattr(args, "shuffle", True)
     hparams.data.shuffle_seed = args.shuffle_seed
     hparams.data.batch_size = args.batch_size
-    hparams.data.pin_memory = False
+    hparams.data.pin_memory = getattr(args, "pin_memory", False)
     hparams.data.num_workers = args.num_workers
 
     energy_normalizers = [
@@ -304,7 +335,9 @@ def build_config(args: argparse.Namespace):
     hparams.trainer.max_epochs = args.max_epochs
     hparams.trainer.accelerator = args.accelerator
     hparams.trainer.devices = args.devices
-    if len(args.devices) > 1:
+    if getattr(args, "strategy", None) is not None:
+        hparams.trainer.strategy = args.strategy
+    elif len(args.devices) > 1:
         hparams.trainer.strategy = "ddp"
     hparams.trainer.gradient_clip_algorithm = "norm"
     hparams.trainer.gradient_clip_val = args.gradient_clip_val
@@ -315,7 +348,7 @@ def build_config(args: argparse.Namespace):
         monitor=args.monitor,
         patience=args.patience,
         mode="min",
-        min_delta=1.0e-5,
+        min_delta=getattr(args, "early_stopping_min_delta", 1.0e-5),
     )
 
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -328,8 +361,8 @@ def build_config(args: argparse.Namespace):
         monitor=args.monitor,
         dirpath=str(checkpoint_dir),
         filename=ckpt_name,
-        save_last=True,
-        save_top_k=1,
+        save_last=getattr(args, "checkpoint_save_last", True),
+        save_top_k=getattr(args, "checkpoint_save_top_k", 1),
         mode="min",
     )
 
@@ -1098,7 +1131,7 @@ def fit_enhance(args: argparse.Namespace) -> tuple[Any, Trainer]:
             max_parent_frame=args.max_parent_frame,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            pin_memory=False,
+            pin_memory=getattr(args, "pin_memory", False),
             shuffle_seed=args.shuffle_seed,
         )
     else:
@@ -1367,8 +1400,50 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument(
+        "--optimizer",
+        choices=OPTIMIZERS,
+        default="adamw",
+        help=(
+            "Optimizer used for fine-tuning. Muon uses a hybrid setup: eligible "
+            "2D hidden weights use Muon and all remaining parameters use AdamW."
+        ),
+    )
     parser.add_argument("--lr", type=float, default=3.0e-5)
     parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--muon_momentum", type=float, default=0.95)
+    parser.add_argument("--muon_ns_steps", type=int, default=5)
+    parser.add_argument(
+        "--muon_adjust_lr_fn",
+        choices=("original", "match_rms_adamw"),
+        default="match_rms_adamw",
+    )
+    parser.add_argument(
+        "--muon_no_nesterov",
+        action="store_true",
+        help="Disable Nesterov momentum for Muon parameters.",
+    )
+    parser.add_argument(
+        "--muon_aux_lr",
+        type=float,
+        default=None,
+        help="Learning rate for non-Muon parameters. Defaults to --lr.",
+    )
+    parser.add_argument(
+        "--muon_aux_weight_decay",
+        type=float,
+        default=None,
+        help="Weight decay for non-Muon parameters. Defaults to --weight_decay.",
+    )
+    parser.add_argument(
+        "--muon_exclude_pattern",
+        action="append",
+        default=None,
+        help=(
+            "fnmatch pattern for parameters that must use auxiliary AdamW. "
+            "May be repeated; overrides the MuonConfig default patterns."
+        ),
+    )
     parser.add_argument("--max_epochs", type=int, default=5000)
     parser.add_argument("--train_split", type=float, default=0.9)
     parser.add_argument(
@@ -1483,6 +1558,8 @@ def parse_args() -> argparse.Namespace:
         f"{args.training_mode}-ew{safe_float_label(args.e_loss_weight)}-"
         f"fw{safe_float_label(args.f_loss_weight)}-dew{safe_float_label(args.delta_e_loss_weight)}"
     )
+    if args.optimizer != "adamw":
+        mode_suffix += f"-opt_{args.optimizer}"
     if args.force_training_strategy == "every_n":
         mode_suffix += f"-force_every{args.force_every_n_steps}"
     elif args.force_training_strategy == "subset":

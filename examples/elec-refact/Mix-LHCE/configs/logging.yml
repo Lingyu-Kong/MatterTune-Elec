@@ -1,0 +1,7 @@
+logging:
+  backend: wandb
+  project: MatterTune-Electrolyte-Li-mix-further-ft
+  run_name: null
+  offline: false
+  log_loss_grad_norms: true
+  grad_norm_log_every_n_steps: 50

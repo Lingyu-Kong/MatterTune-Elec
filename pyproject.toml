@@ -22,6 +22,7 @@ dependencies = [
     "tensorboardX",
     "nshutils",
     "watchdog",
+    "PyYAML",
 ]
 
 [project.optional-dependencies]

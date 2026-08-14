@@ -1,0 +1,2 @@
+trainer:
+  devices: [2, 5, 6, 7]

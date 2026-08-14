@@ -4,7 +4,7 @@ import contextlib
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, Generic, Literal
+from typing import Any, Generic
 
 import ase
 import nshconfig as C
@@ -14,7 +14,7 @@ import torch.nn as nn
 from lightning.pytorch import LightningModule
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from torch.utils.data import Dataset
-from typing_extensions import NotRequired, TypedDict, TypeVar, Unpack, cast, override
+from typing_extensions import TypedDict, TypeVar, Unpack, cast, override
 
 from ..normalization import ComposeNormalizers, NormalizationContext, NormalizerConfig
 from .loader import DataLoaderKwargs, create_dataloader
@@ -652,7 +652,15 @@ class FinetuneModuleBase(
             "train",
             self.train_metrics,
         )
-        self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"])
+        optimizer = self.trainer.optimizers[0]
+        self.log("lr", optimizer.param_groups[0]["lr"])
+        named_learning_rates = {
+            str(group["optimizer_name"]): group["lr"]
+            for group in optimizer.param_groups
+            if "optimizer_name" in group
+        }
+        for optimizer_name, learning_rate in named_learning_rates.items():
+            self.log(f"lr/{optimizer_name}", learning_rate)
         return loss
 
     @override

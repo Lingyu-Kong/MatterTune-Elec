@@ -1,0 +1,20 @@
+includes:
+  - ../../configs/model/mattersim-1m.yml
+  - data.yml
+  - objective.yml
+  - ../../configs/optimizer/adamw.yml
+  - ../../configs/scheduler/reduce-on-plateau.yml
+  - ../../configs/trainer/default.yml
+  - trainer.yml
+  - checkpoint.yml
+  - logging.yml
+  - evaluation.yml
+
+variables:
+  data_root: ${env:MIX_LHCE_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix}
+  single_sol_root: ${env:SINGLE_SOL_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-V1}
+
+experiment:
+  name: mix-lhce
+  output_root: ${variables.data_root}/local_runs/elec-refact/Mix-LHCE
+  output_dir: null

@@ -2,6 +2,7 @@ __codegen__ = True
 
 from mattertune.finetune.optimizer import AdamConfig as AdamConfig
 from mattertune.finetune.optimizer import AdamWConfig as AdamWConfig
+from mattertune.finetune.optimizer import MuonConfig as MuonConfig
 from mattertune.finetune.lr_scheduler import ConstantLRConfig as ConstantLRConfig
 from mattertune.finetune.lr_scheduler import CosineAnnealingLRConfig as CosineAnnealingLRConfig
 from mattertune.finetune.properties import EnergyPropertyConfig as EnergyPropertyConfig
@@ -24,6 +25,7 @@ from mattertune.finetune.properties import StressesPropertyConfig as StressesPro
 
 from mattertune.finetune.optimizer import AdamConfig as AdamConfig
 from mattertune.finetune.optimizer import AdamWConfig as AdamWConfig
+from mattertune.finetune.optimizer import MuonConfig as MuonConfig
 from mattertune.finetune.lr_scheduler import ConstantLRConfig as ConstantLRConfig
 from mattertune.finetune.lr_scheduler import CosineAnnealingLRConfig as CosineAnnealingLRConfig
 from mattertune.finetune.properties import EnergyPropertyConfig as EnergyPropertyConfig
@@ -59,6 +61,7 @@ from . import properties as properties
 __all__ = [
     "AdamConfig",
     "AdamWConfig",
+    "MuonConfig",
     "ConstantLRConfig",
     "CosineAnnealingLRConfig",
     "EnergyPropertyConfig",

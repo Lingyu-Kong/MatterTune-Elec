@@ -1,0 +1,5 @@
+checkpoint:
+  init_checkpoint: ${variables.single_sol_root}/local_runs/enhance-V1/with_enhance/train_without_delta_e/20260701-225958-mattersim-MatterSim-v1p0p0-1M-conservative-train_without_delta_e-ew200p0-fw20p0-dew0p0/checkpoints/mattersim-MatterSim-v1.0.0-1M-conservative-train_without_delta_e-best.ckpt
+  resume_checkpoint: null
+  save_last: true
+  save_top_k: 1

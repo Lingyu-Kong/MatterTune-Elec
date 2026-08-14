@@ -2,6 +2,7 @@ __codegen__ = True
 
 from mattertune.finetune.optimizer import AdamConfig as AdamConfig
 from mattertune.finetune.optimizer import AdamWConfig as AdamWConfig
+from mattertune.finetune.optimizer import MuonConfig as MuonConfig
 from mattertune.data.atoms_list import AtomsListDatasetConfig as AtomsListDatasetConfig
 from mattertune.data.datamodule import AutoSplitDataModuleConfig as AutoSplitDataModuleConfig
 from mattertune.main import CSVLoggerConfig as CSVLoggerConfig
@@ -70,6 +71,7 @@ from mattertune.data import XYZDatasetConfig as XYZDatasetConfig
 
 from mattertune.finetune.optimizer import AdamConfig as AdamConfig
 from mattertune.finetune.optimizer import AdamWConfig as AdamWConfig
+from mattertune.finetune.optimizer import MuonConfig as MuonConfig
 from mattertune.data.atoms_list import AtomsListDatasetConfig as AtomsListDatasetConfig
 from mattertune.data.datamodule import AutoSplitDataModuleConfig as AutoSplitDataModuleConfig
 from mattertune.main import CSVLoggerConfig as CSVLoggerConfig
@@ -164,6 +166,7 @@ from . import wrappers as wrappers
 __all__ = [
     "AdamConfig",
     "AdamWConfig",
+    "MuonConfig",
     "AtomsListDatasetConfig",
     "AutoSplitDataModuleConfig",
     "CSVLoggerConfig",

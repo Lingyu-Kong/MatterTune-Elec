@@ -1,0 +1,10 @@
+model:
+  type: mattersim
+  name: MatterSim-v1.0.0-1M
+  task_name: omol
+  force_mode: conservative
+  graph_radius: 6.0
+  max_num_neighbors: 120
+  orb_edge_method: null
+  reset_output_heads: false
+  freeze_backbone: false
