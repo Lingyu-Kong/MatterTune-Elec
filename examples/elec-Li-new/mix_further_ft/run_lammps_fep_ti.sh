@@ -31,6 +31,7 @@ FRICTION_FS_INV="${FRICTION_FS_INV:-0.02}"
 THERMO_INTERVAL="${THERMO_INTERVAL:-100}"
 DUMP_INTERVAL="${DUMP_INTERVAL:-100}"
 XTC_DUMP_INTERVAL="${XTC_DUMP_INTERVAL:-500}"
+RESTART_INTERVAL="${RESTART_INTERVAL:-1000}"
 ENERGY_LOG_INTERVAL="${ENERGY_LOG_INTERVAL:-1}"
 SEED="${SEED:-7}"
 INIT_VELOCITIES="${INIT_VELOCITIES:-1}"
@@ -75,7 +76,7 @@ Common options:
 Environment overrides:
   CONDA_ENV CONDA_SH LMP_BIN LAMMPS_PYTHON_DIR MATTERTUNE_DIR MATTERSIM_DIR RUN_ROOT RUN_DIR
   TARGET_TYPE ELEMENT_ORDER SIGMA EPSILON THERMO_INTERVAL DUMP_INTERVAL XTC_DUMP_INTERVAL ENERGY_LOG_INTERVAL SEED
-  INIT_VELOCITIES KOKKOS_GPUS CUDA_VISIBLE_DEVICES_VALUE EXPORT_DEVICE STRICT NO_COMPILE FORCE_EXPORT
+  RESTART_INTERVAL INIT_VELOCITIES KOKKOS_GPUS CUDA_VISIBLE_DEVICES_VALUE EXPORT_DEVICE STRICT NO_COMPILE FORCE_EXPORT
 EOF
 }
 
@@ -157,6 +158,8 @@ TEMPERATURE_LOG_PATH="${RUN_DIR}/fep-ti-temperature.csv"
 FINAL_DATA_PATH="${RUN_DIR}/final_${LAMBDA_TAG}.data"
 DUMP_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.lammpstrj"
 XTC_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.xtc"
+RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
+RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
 LOG_PATH="${RUN_DIR}/log.${LAMBDA_TAG}.lammps"
 CONFIG_PATH="${RUN_DIR}/run_lammps_fep_ti_config.txt"
 
@@ -201,6 +204,7 @@ steps=${STEPS}
 thermo_interval=${THERMO_INTERVAL}
 dump_interval=${DUMP_INTERVAL}
 xtc_dump_interval=${XTC_DUMP_INTERVAL}
+restart_interval=${RESTART_INTERVAL}
 energy_log_interval=${ENERGY_LOG_INTERVAL}
 sigma=${SIGMA}
 epsilon=${EPSILON}
@@ -212,6 +216,8 @@ metadata_path=${METADATA_PATH}
 energy_log_path=${ENERGY_LOG_PATH}
 dump_path=${DUMP_PATH}
 xtc_path=${XTC_PATH}
+restart_path_1=${RESTART_PATH_1}
+restart_path_2=${RESTART_PATH_2}
 energy_log_raw_path=${ENERGY_LOG_RAW_PATH}
 temperature_log_path=${TEMPERATURE_LOG_PATH}
 log_path=${LOG_PATH}
@@ -295,6 +301,9 @@ run_cmd python "${SCRIPT_DIR}/prepare_lammps_ghost_target_input.py" \
   --thermo-interval "${THERMO_INTERVAL}" \
   --dump-interval "${DUMP_INTERVAL}" \
   --xtc-dump-interval "${XTC_DUMP_INTERVAL}" \
+  --restart-interval "${RESTART_INTERVAL}" \
+  --restart-path-1 "${RESTART_PATH_1}" \
+  --restart-path-2 "${RESTART_PATH_2}" \
   --seed "${SEED}" \
   --final-data "${FINAL_DATA_PATH}" \
   --dump "${DUMP_PATH}" \

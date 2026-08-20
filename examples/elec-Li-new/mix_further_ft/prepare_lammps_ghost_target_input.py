@@ -212,6 +212,9 @@ def write_lammps_input(
     xtc_path: Path,
     temperature_log_path: Path | None = None,
     temperature_log_interval: int = 1,
+    restart_interval: int | None = None,
+    restart_path_1: Path = Path("lmp.restart.1"),
+    restart_path_2: Path = Path("lmp.restart.2"),
 ) -> None:
     if timestep_fs <= 0.0:
         raise ValueError("timestep_fs must be positive")
@@ -225,6 +228,8 @@ def write_lammps_input(
         raise ValueError("thermo_interval and dump_interval must be positive")
     if temperature_log_path is not None and temperature_log_interval <= 0:
         raise ValueError("temperature_log_interval must be positive")
+    if restart_interval is not None and restart_interval <= 0:
+        raise ValueError("restart_interval must be positive")
 
     timestep_ps = timestep_fs * 0.001
     damping_ps = 1.0 / friction_fs_inv * 0.001
@@ -265,10 +270,14 @@ def write_lammps_input(
         handle.write(f"thermo          {thermo_interval}\n")
         handle.write("thermo_style    custom step temp pe ke etotal press\n")
         handle.write("thermo_modify   flush yes\n\n")
-
         if warmup_steps > 0:
             handle.write(f"run             {warmup_steps}\n")
             handle.write("reset_timestep  0\n\n")
+
+        if restart_interval is not None:
+            handle.write(
+                f"restart         {restart_interval} {restart_path_1} {restart_path_2}\n\n"
+            )
 
         if steps > 0:
             handle.write(f"dump            traj all custom {dump_interval} {dump_path} id type x y z\n")
@@ -312,6 +321,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature-log", type=Path, default=None)
     parser.add_argument("--temperature-log-interval", type=int, default=1)
     parser.add_argument("--xtc-dump", type=Path, required=True)
+    parser.add_argument("--restart-interval", type=int, default=1000)
+    parser.add_argument("--restart-path-1", type=Path, default=Path("lmp.restart.1"))
+    parser.add_argument("--restart-path-2", type=Path, default=Path("lmp.restart.2"))
 
     args = parser.parse_args()
 
@@ -320,6 +332,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.temperature_log_interval <= 0:
         parser.error("--temperature-log-interval must be positive")
+    if args.restart_interval <= 0:
+        parser.error("--restart-interval must be positive")
     return args
 
 
@@ -359,6 +373,9 @@ def main() -> None:
             None if args.temperature_log is None else args.temperature_log.resolve()
         ),
         temperature_log_interval=args.temperature_log_interval,
+        restart_interval=args.restart_interval,
+        restart_path_1=args.restart_path_1,
+        restart_path_2=args.restart_path_2,
     )
 
     payload = {
@@ -380,6 +397,9 @@ def main() -> None:
         "xtc_dump": str(args.xtc_dump),
         "temperature_log": None if args.temperature_log is None else str(args.temperature_log),
         "temperature_log_interval": args.temperature_log_interval,
+        "restart_interval": args.restart_interval,
+        "restart_path_1": str(args.restart_path_1),
+        "restart_path_2": str(args.restart_path_2),
         **metadata,
     }
 
