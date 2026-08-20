@@ -310,7 +310,8 @@ python examples/elec-Li-new/mix_further_ft/merge_lammps_fep_ti_energy_log.py \
 3. 调用 `export_mattertune_ghost_target_lammps_mliap.py`，从 checkpoint 导出 `.pt`，并把
    raw energy CSV 的输出路径写进 `.pt`。
 4. 调用 `prepare_lammps_ghost_target_input.py`，从 PDB 写出 LAMMPS data、`in.lammps`、metadata
-   和每步 temperature sidecar 配置。
+   和每步 temperature sidecar 配置；production 阶段默认每 1000 steps 在
+   `lmp.restart.1`、`lmp.restart.2` 之间交替写二进制 restart。
 5. 调用 `${LMP_BIN}` 用 Kokkos/ML-IAP 跑 warmup 和 production MD。
 6. 调用 `merge_lammps_fep_ti_energy_log.py`，把 raw energy 和 temperature sidecar 合并成
    `fep-ti-energy.log`。
@@ -377,8 +378,91 @@ fep-ti-energy.raw.csv
 fep-ti-temperature.csv
 log.lambdaXXX.lammps
 traj_lambdaXXX.lammpstrj
+traj_lambdaXXX.xtc
 final_lambdaXXX.data
+lmp.restart.1
+lmp.restart.2
 ```
+
+`RESTART_INTERVAL` 环境变量可以调整 restart 间隔；默认值为 `1000`。restart 命令放在
+warmup 和 `reset_timestep 0` 之后，因此 restart 中保存的 timestep 对应 production MD
+步数。如果任务在第一个 restart 间隔之前终止，则目录中还不会出现 restart 文件。
+
+### 4.1 从 restart 继续 FEP-TI
+
+续跑使用 `run_lammps_fep_ti_restart.sh`。它从原始 `RUN_DIR` 中读取
+`prepare_metadata.json` 和 `run_lammps_fep_ti_config.txt`，自动比较
+`lmp.restart.1`、`lmp.restart.2` 的修改时间并选择较新的文件。也可以用
+`--restart-file` 明确指定其中一个文件。
+
+默认的 `total` 模式把 restart 中已经完成的 production steps 计算在内，并跑到第一次
+配置的总 `steps`。例如第一次目标为 2000000 steps、restart 保存于 step 600000，续跑
+input 中会使用 `run 2000000 upto`，因此只再运行约 1400000 steps：
+
+```bash
+bash examples/elec-Li-new/mix_further_ft/run_lammps_fep_ti_restart.sh \
+  --run-dir /path/to/original_run
+```
+
+也可以明确覆盖总目标：
+
+```bash
+bash examples/elec-Li-new/mix_further_ft/run_lammps_fep_ti_restart.sh \
+  --run-dir /path/to/original_run \
+  --total-steps 3000000
+```
+
+如果希望不考虑 restart 中已有的 timestep，而是从当前状态额外运行指定步数，使用
+`additional` 模式：
+
+```bash
+bash examples/elec-Li-new/mix_further_ft/run_lammps_fep_ti_restart.sh \
+  --run-dir /path/to/original_run \
+  --additional-steps 100000
+```
+
+等价的通用写法是 `--steps-mode total|additional --steps N`。如果没有提供 `--steps`，
+两种模式都会读取第一次运行配置中的 `steps`；默认模式是 `total`。
+
+续跑默认仍在原始 `RUN_DIR` 中输出。二进制 checkpoint 始终只有
+`lmp.restart.1`、`lmp.restart.2`，LAMMPS 继续在两者之间交替覆盖；它们不会扩展成
+`lmp.restart.3`。每次实际启动的续跑任务则根据已有 log 的最大编号生成新的
+`restart1`、`restart2`、`restart3` 等标签：
+
+```text
+RUN_DIR/
+├── lmp.restart.1
+├── lmp.restart.2
+├── fep-ti-energy.raw.csv
+├── fep-ti-energy.log
+├── fep-ti-temperature.csv
+├── log.lambdaXXX.lammps
+├── traj_lambdaXXX.xtc
+├── final_lambdaXXX.data
+├── log.lambdaXXX.restart1.lammps
+├── traj_lambdaXXX_restart1.lammpstrj
+├── traj_lambdaXXX_restart1.xtc
+├── final_lambdaXXX_restart1.data
+├── log.lambdaXXX.restart2.lammps
+├── traj_lambdaXXX_restart2.lammpstrj
+├── traj_lambdaXXX_restart2.xtc
+└── final_lambdaXXX_restart2.data
+```
+
+这样 log、LAMMPS trajectory、XTC 和 final data 不会覆盖前一次运行。temperature sidecar
+继续追加到原来的 `fep-ti-temperature.csv`；restart ML-IAP 先写一个临时 raw-energy
+segment，LAMMPS 正常结束后脚本把它无重复表头地合并进原来的
+`fep-ti-energy.raw.csv`，重新生成同一个 `fep-ti-energy.log`，并删除临时 segment。
+
+只生成 restart input、模型和 metadata 而不启动 LAMMPS：
+
+```bash
+bash examples/elec-Li-new/mix_further_ft/run_lammps_fep_ti_restart.sh \
+  --run-dir /path/to/original_run \
+  --prepare-only
+```
+
+`--prepare-only` 不会消耗 `restartN` 运行编号；编号根据实际 LAMMPS log 文件确定。
 
 ## 5. 方法三：正常 MatterTune-MatterSim LAMMPS MD（非 FEP-TI）
 
