@@ -102,7 +102,9 @@ def normalize_model_type(raw: str) -> str:
     }
     model_type = aliases.get(model_type, model_type)
     if model_type not in MODEL_TYPES:
-        raise ValueError(f"Unsupported model_type {raw!r}; expected one of {MODEL_TYPES}.")
+        raise ValueError(
+            f"Unsupported model_type {raw!r}; expected one of {MODEL_TYPES}."
+        )
     return model_type
 
 
@@ -118,7 +120,9 @@ def normalize_force_mode(raw: str) -> str:
     }
     force_mode = aliases.get(force_mode, force_mode)
     if force_mode not in FORCE_MODES:
-        raise ValueError(f"Unsupported force_mode {raw!r}; expected one of {FORCE_MODES}.")
+        raise ValueError(
+            f"Unsupported force_mode {raw!r}; expected one of {FORCE_MODES}."
+        )
     return force_mode
 
 
@@ -211,7 +215,9 @@ def validate_supervision_args(args: argparse.Namespace) -> None:
                 "Delta-E pair training requires --batch_size >= 2 and an even batch size."
             )
     if args.delta_e_loss_weight > 0.0 and args.force_training_strategy != "all":
-        raise ValueError("Delta-E training is only supported with --force_training_strategy all.")
+        raise ValueError(
+            "Delta-E training is only supported with --force_training_strategy all."
+        )
     if args.force_every_n_steps < 1:
         raise ValueError("--force_every_n_steps must be >= 1.")
     if args.model_type == "mattersim" and args.force_mode != "conservative":
@@ -314,7 +320,10 @@ def build_config(args: argparse.Namespace):
 
     hparams.data = MC.AutoSplitDataModuleConfig.draft()
     hparams.data.dataset = MC.XYZDatasetConfig.draft()
-    hparams.data.dataset.src = str(args.train_file)
+    if isinstance(args.train_file, (list, tuple)):
+        hparams.data.dataset.src = [str(path) for path in args.train_file]
+    else:
+        hparams.data.dataset.src = str(args.train_file)
     hparams.data.train_split = args.train_split
     hparams.data.shuffle = getattr(args, "shuffle", True)
     hparams.data.shuffle_seed = args.shuffle_seed
@@ -433,7 +442,9 @@ class PairBatchSampler(BatchSampler):
         self.num_replicas = max(1, int(num_replicas))
         self.rank = int(rank)
         if self.rank < 0 or self.rank >= self.num_replicas:
-            raise ValueError(f"Invalid rank {self.rank} for {self.num_replicas} replicas.")
+            raise ValueError(
+                f"Invalid rank {self.rank} for {self.num_replicas} replicas."
+            )
         self.epoch = 0
 
     def _rank_pair_indices(self, pair_indices: np.ndarray) -> np.ndarray:
@@ -445,7 +456,7 @@ class PairBatchSampler(BatchSampler):
         if total_size > len(pair_indices):
             padding = np.resize(pair_indices, total_size - len(pair_indices))
             pair_indices = np.concatenate([pair_indices, padding])
-        return pair_indices[self.rank:total_size:self.num_replicas]
+        return pair_indices[self.rank : total_size : self.num_replicas]
 
     def __iter__(self) -> Iterator[list[int]]:
         pair_indices = self.pair_indices.copy()
@@ -516,7 +527,9 @@ class DeltaPairDataModule(LightningDataModule):
     ):
         super().__init__()
         if batch_size < 2 or batch_size % 2 != 0:
-            raise ValueError("Delta-E pair training requires an even --batch_size >= 2.")
+            raise ValueError(
+                "Delta-E pair training requires an even --batch_size >= 2."
+            )
         self.pair_file = pair_file
         self.train_split = train_split
         self.max_parent_frame = max_parent_frame
@@ -537,7 +550,9 @@ class DeltaPairDataModule(LightningDataModule):
         if not isinstance(atoms_list, list):
             atoms_list = [atoms_list]
         if len(atoms_list) % 2:
-            raise ValueError(f"Pair file must contain an even number of structures: {self.pair_file}")
+            raise ValueError(
+                f"Pair file must contain an even number of structures: {self.pair_file}"
+            )
 
         for index in range(0, len(atoms_list), 2):
             left = atoms_list[index].info
@@ -548,7 +563,9 @@ class DeltaPairDataModule(LightningDataModule):
                     f"in {self.pair_file}"
                 )
             if pair_id(left) != pair_id(right):
-                raise ValueError(f"Mismatched pair ids at structures {index}/{index + 1}.")
+                raise ValueError(
+                    f"Mismatched pair ids at structures {index}/{index + 1}."
+                )
 
         original_n_pairs = len(atoms_list) // 2
         if self.max_parent_frame is not None:
@@ -588,7 +605,9 @@ class DeltaPairDataModule(LightningDataModule):
             delta_pair_role = torch.tensor([pair_role(atoms.info)], dtype=torch.long)
             data.delta_pair_id = delta_pair_id
             data.delta_pair_role = delta_pair_role
-            if hasattr(data, "system_features") and isinstance(data.system_features, dict):
+            if hasattr(data, "system_features") and isinstance(
+                data.system_features, dict
+            ):
                 data.system_features["delta_pair_id"] = delta_pair_id
                 data.system_features["delta_pair_role"] = delta_pair_role
             if isinstance(data, dict):
@@ -656,12 +675,16 @@ def delta_pair_indices(batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
         pair_id_tensor = batch["delta_pair_id"]
         role_tensor = batch["delta_pair_role"]
     else:
-        raise AttributeError("Batch does not contain delta_pair_id/delta_pair_role metadata.")
+        raise AttributeError(
+            "Batch does not contain delta_pair_id/delta_pair_role metadata."
+        )
 
     pair_ids = pair_id_tensor.reshape(-1).detach().cpu().tolist()
     roles = role_tensor.reshape(-1).detach().cpu().tolist()
     by_pair: dict[int, dict[int, int]] = {}
-    for graph_index, (pair_id_value, role) in enumerate(zip(pair_ids, roles, strict=True)):
+    for graph_index, (pair_id_value, role) in enumerate(
+        zip(pair_ids, roles, strict=True)
+    ):
         by_pair.setdefault(int(pair_id_value), {})[int(role)] = graph_index
 
     normal_indices: list[int] = []
@@ -678,7 +701,9 @@ def delta_pair_indices(batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
     )
 
 
-def weighted_grad_norm(loss: torch.Tensor, parameters: list[torch.nn.Parameter]) -> torch.Tensor:
+def weighted_grad_norm(
+    loss: torch.Tensor, parameters: list[torch.nn.Parameter]
+) -> torch.Tensor:
     if not loss.requires_grad:
         return torch.zeros((), device=loss.device, dtype=loss.dtype)
     grads = torch.autograd.grad(
@@ -695,7 +720,9 @@ def weighted_grad_norm(loss: torch.Tensor, parameters: list[torch.nn.Parameter])
 
 
 def should_log_grad_norms(module: Any, mode: str) -> bool:
-    if mode != "train" or not bool(getattr(module, "_enhance_log_loss_grad_norms", False)):
+    if mode != "train" or not bool(
+        getattr(module, "_enhance_log_loss_grad_norms", False)
+    ):
         return False
     interval = max(1, int(getattr(module, "_enhance_grad_norm_log_every_n_steps", 50)))
     trainer = getattr(module, "trainer", None)
@@ -713,7 +740,9 @@ def log_component_grad_norms(
 ) -> None:
     if not should_log_grad_norms(module, mode):
         return
-    parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+    parameters = [
+        parameter for parameter in module.parameters() if parameter.requires_grad
+    ]
     if not parameters:
         return
     for name, loss in component_losses.items():
@@ -785,7 +814,9 @@ def force_active_for_step(module: Any, batch: Any, mode: str) -> bool:
             if strategy == "none":
                 return False
             if strategy == "subset":
-                key = str(getattr(module, "_enhance_force_subset_key", "force_train_mask"))
+                key = str(
+                    getattr(module, "_enhance_force_subset_key", "force_train_mask")
+                )
                 return batch_has_subset_forces(batch, key)
             return False
         raise ValueError(f"Unsupported validation force mode: {validation_mode}")
@@ -926,9 +957,12 @@ def attach_enhanced_loss(
             label = labels[prop.name]
             if (
                 prop.name in force_names
-                and str(getattr(self, "_enhance_force_training_strategy", "all")) == "subset"
+                and str(getattr(self, "_enhance_force_training_strategy", "all"))
+                == "subset"
             ):
-                subset_key = str(getattr(self, "_enhance_force_subset_key", "force_train_mask"))
+                subset_key = str(
+                    getattr(self, "_enhance_force_subset_key", "force_train_mask")
+                )
                 prediction, label = maybe_mask_force_loss(
                     batch,
                     prop.name,
@@ -975,7 +1009,9 @@ def attach_enhanced_loss(
                 delta_mae = torch.mean(torch.abs(pred_delta - label_delta))
             else:
                 delta_loss = denorm_predictions["energy"].sum() * 0.0
-                delta_mae = torch.zeros((), device=delta_loss.device, dtype=delta_loss.dtype)
+                delta_mae = torch.zeros(
+                    (), device=delta_loss.device, dtype=delta_loss.dtype
+                )
 
             weighted_delta_loss = delta_loss * delta_e_loss_weight
             losses.append(weighted_delta_loss)
@@ -1080,9 +1116,7 @@ def initialize_from_checkpoint(model: Any, checkpoint_path: Path | None) -> None
     incompatible = model.load_state_dict(state_dict, strict=False)
     unexpected_keys = list(incompatible.unexpected_keys)
     missing_non_normalizer_keys = [
-        key
-        for key in incompatible.missing_keys
-        if not key.startswith("normalizers.")
+        key for key in incompatible.missing_keys if not key.startswith("normalizers.")
     ]
     if unexpected_keys or missing_non_normalizer_keys:
         raise RuntimeError(
@@ -1112,10 +1146,16 @@ def fit_enhance(args: argparse.Namespace) -> tuple[Any, Trainer]:
         args.force_training_strategy in {"every_n", "subset"}
         or args.validation_force_mode != "all"
     )
-    if args.training_mode == TRAIN_WITH_DELTA_E or args.log_loss_grad_norms or needs_dynamic_force_step:
+    if (
+        args.training_mode == TRAIN_WITH_DELTA_E
+        or args.log_loss_grad_norms
+        or needs_dynamic_force_step
+    ):
         attach_enhanced_loss(
             model,
-            delta_e_loss_weight=args.delta_e_loss_weight if args.training_mode == TRAIN_WITH_DELTA_E else 0.0,
+            delta_e_loss_weight=args.delta_e_loss_weight
+            if args.training_mode == TRAIN_WITH_DELTA_E
+            else 0.0,
             log_loss_grad_norms=args.log_loss_grad_norms,
             grad_norm_log_every_n_steps=args.grad_norm_log_every_n_steps,
             force_training_strategy=args.force_training_strategy,
@@ -1188,7 +1228,9 @@ def summarize_errors(
         if group_name == "all":
             idx = np.arange(len(groups))
         else:
-            idx = np.asarray([i for i, group in enumerate(groups) if group == group_name])
+            idx = np.asarray(
+                [i for i, group in enumerate(groups) if group == group_name]
+            )
         if len(idx) == 0:
             continue
 
@@ -1270,7 +1312,9 @@ def save_parity_plot(
     plt.close(fig)
 
 
-def evaluate_checkpoint(args: argparse.Namespace, ckpt_path: str | Path) -> dict[str, dict[str, float | int]]:
+def evaluate_checkpoint(
+    args: argparse.Namespace, ckpt_path: str | Path
+) -> dict[str, dict[str, float | int]]:
     model = load_finetuned_checkpoint(str(ckpt_path))
     eval_device = args.eval_device or f"cuda:{args.devices[0]}"
     calc = model.ase_calculator(device=eval_device)
@@ -1297,7 +1341,9 @@ def evaluate_checkpoint(args: argparse.Namespace, ckpt_path: str | Path) -> dict
         energy_pred.append(pred_e)
         if eval_forces:
             forces_gt.append(forces_from_atoms(atoms))
-            forces_pred.append(np.asarray(atoms_for_pred.get_forces(), dtype=np.float64))
+            forces_pred.append(
+                np.asarray(atoms_for_pred.get_forces(), dtype=np.float64)
+            )
         natoms.append(len(atoms))
         groups.append(structure_group(atoms))
 
@@ -1372,7 +1418,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_num_neighbors", type=int, default=120)
     parser.add_argument(
         "--orb_edge_method",
-        choices=("knn_brute_force", "knn_scipy", "knn_cuml_brute", "knn_cuml_rbc", "knn_alchemi"),
+        choices=(
+            "knn_brute_force",
+            "knn_scipy",
+            "knn_cuml_brute",
+            "knn_cuml_rbc",
+            "knn_alchemi",
+        ),
         default=None,
         help=(
             "Optional ORB graph edge-construction method. For CPU featurization, "
@@ -1511,7 +1563,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient_clip_val", type=float, default=2.0)
     parser.add_argument("--ema_decay", type=float, default=0.99)
     parser.add_argument("--logger", choices=("wandb", "csv"), default="wandb")
-    parser.add_argument("--wandb_project", default="MatterTune-Electrolyte-Li-enhance-V1")
+    parser.add_argument(
+        "--wandb_project", default="MatterTune-Electrolyte-Li-enhance-V1"
+    )
     parser.add_argument("--wandb_name", default="")
     parser.add_argument("--wandb_offline", action="store_true")
     parser.add_argument("--eval_device", default="")

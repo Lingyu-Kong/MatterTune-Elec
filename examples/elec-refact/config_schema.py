@@ -31,7 +31,7 @@ class ModelSettings:
 
 @dataclass
 class DataSettings:
-    train_file: str
+    train_file: str | list[str]
     energy_reference: str
     pair_train_file: str | None = None
     test_file: str | None = None
@@ -42,6 +42,17 @@ class DataSettings:
     num_workers: int = 0
     pin_memory: bool = False
     max_parent_frame: int | None = None
+
+
+@dataclass
+class ReferenceSettings:
+    auto_generate: bool = True
+    refit: bool = False
+    method: Literal["residual"] = "residual"
+    baseline: Literal["ase_pretrained"] = "ase_pretrained"
+    regression: Literal["ridge", "linear"] = "ridge"
+    ridge_alpha: float = 1.0
+    device: str = "cuda:0"
 
 
 @dataclass
@@ -144,6 +155,7 @@ class TrainingSettings:
     experiment: ExperimentSettings
     model: ModelSettings
     data: DataSettings
+    reference: ReferenceSettings
     objective: ObjectiveSettings
     optimizer: OptimizerSettings
     scheduler: SchedulerSettings
@@ -171,6 +183,9 @@ class TrainingSettings:
             ),
             model=_build_section(ModelSettings, value["model"], "model"),
             data=_build_section(DataSettings, value["data"], "data"),
+            reference=_build_section(
+                ReferenceSettings, value["reference"], "reference"
+            ),
             objective=_build_section(
                 ObjectiveSettings, value["objective"], "objective"
             ),
@@ -230,6 +245,10 @@ class TrainingSettings:
             raise ValueError("data.train_split must be between zero and one.")
         if self.data.batch_size < 1:
             raise ValueError("data.batch_size must be positive.")
+        if isinstance(self.data.train_file, list) and not self.data.train_file:
+            raise ValueError("data.train_file must contain at least one path.")
+        if self.reference.ridge_alpha < 0.0:
+            raise ValueError("reference.ridge_alpha must be non-negative.")
         if self.trainer.max_epochs < 1:
             raise ValueError("trainer.max_epochs must be positive.")
         if not self.trainer.devices:

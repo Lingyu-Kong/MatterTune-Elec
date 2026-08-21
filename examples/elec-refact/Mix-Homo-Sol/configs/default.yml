@@ -12,10 +12,11 @@ includes:
   - evaluation.yml
 
 variables:
-  data_root: ${env:SINGLE_SOL_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/single-sol}
+  data_root: ${env:MIX_HOMO_SOL_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/mix-homogeneous-sol}
+  single_sol_data_root: ${env:SINGLE_SOL_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/single-sol}
   results_root: ${env:ELECTROLYTE_RESULTS_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteResults}
 
 experiment:
-  name: single-sol
-  output_root: ${variables.results_root}/single-sol
+  name: mix-homo-sol
+  output_root: ${variables.results_root}/mix-homo-sol
   output_dir: null

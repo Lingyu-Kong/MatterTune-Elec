@@ -15,6 +15,7 @@ import yaml
 
 from config_loader import load_training_settings
 from config_schema import TrainingSettings
+from reference import ensure_energy_reference
 
 
 REFACT_ROOT = Path(__file__).resolve().parent
@@ -40,6 +41,12 @@ def _path_or_none(value: str | None) -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def _path_or_paths(value: str | list[str]) -> Path | list[Path]:
+    if isinstance(value, str):
+        return Path(value).expanduser()
+    return [Path(item).expanduser() for item in value]
+
+
 def _safe_label(value: str) -> str:
     return "".join(
         character if character.isalnum() or character in "_.-" else "-"
@@ -47,19 +54,16 @@ def _safe_label(value: str) -> str:
     )
 
 
-def _default_run_name(settings: TrainingSettings, training_mode: str) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    model = _safe_label(settings.model.name.replace(".", "p"))
-    return (
-        f"{timestamp}-{_safe_label(settings.experiment.name)}-{model}-"
-        f"{settings.optimizer.name}-{training_mode}"
-    )
+def _job_name(settings: TrainingSettings, started_at: datetime) -> str:
+    timestamp = started_at.strftime("%Y%m%d-%H%M%S-%f")
+    return f"{timestamp}-{settings.optimizer.name}"
 
 
 def build_training_args(
     settings: TrainingSettings,
     *,
     validate_files: bool = True,
+    started_at: datetime | None = None,
 ) -> Namespace:
     backend = load_training_backend()
     args = Namespace(
@@ -74,7 +78,7 @@ def build_training_args(
         orb_edge_method=settings.model.orb_edge_method,
         reset_output_heads=settings.model.reset_output_heads,
         freeze_backbone=settings.model.freeze_backbone,
-        train_file=Path(settings.data.train_file).expanduser(),
+        train_file=_path_or_paths(settings.data.train_file),
         pair_train_file=_path_or_none(settings.data.pair_train_file),
         test_file=_path_or_none(settings.data.test_file),
         energy_reference=Path(settings.data.energy_reference).expanduser(),
@@ -136,27 +140,33 @@ def build_training_args(
         eval_seed=settings.evaluation.seed,
         max_eval_structures=settings.evaluation.max_structures,
         max_force_plot_points=settings.evaluation.max_force_plot_points,
+        reference_device=settings.reference.device,
     )
 
     backend.validate_supervision_args(args)
-    run_name = settings.logging.run_name or _default_run_name(
-        settings, args.training_mode
+    started_at = started_at or datetime.now()
+    job_name = _job_name(settings, started_at)
+    run_name = settings.logging.run_name or (
+        f"{job_name}-{_safe_label(settings.experiment.name)}"
     )
+    args.job_name = job_name
+    args.job_started_at = started_at.isoformat()
     args.wandb_name = run_name
     if settings.experiment.output_dir:
         output_dir = Path(settings.experiment.output_dir).expanduser()
     else:
-        output_dir = (
-            Path(settings.experiment.output_root).expanduser()
-            / args.training_mode
-            / run_name
-        )
+        output_dir = Path(settings.experiment.output_root).expanduser() / job_name
     args.output_dir = output_dir
     args.checkpoint_dir = output_dir / "checkpoints"
     args.log_dir = output_dir / "logs"
 
     if validate_files:
-        required: list[Path | None] = [args.train_file, args.energy_reference]
+        train_files = (
+            args.train_file if isinstance(args.train_file, list) else [args.train_file]
+        )
+        required: list[Path | None] = [*train_files]
+        if not settings.reference.auto_generate:
+            required.append(args.energy_reference)
         if not args.skip_eval:
             required.append(args.test_file)
         if args.training_mode == backend.TRAIN_WITH_DELTA_E:
@@ -175,11 +185,18 @@ def build_training_args(
     return args
 
 
+def _jsonable_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _jsonable_value(item) for key, item in value.items()}
+    return value
+
+
 def _jsonable_args(args: Namespace) -> dict[str, Any]:
-    return {
-        key: str(value) if isinstance(value, Path) else value
-        for key, value in vars(args).items()
-    }
+    return {key: _jsonable_value(value) for key, value in vars(args).items()}
 
 
 def resolved_snapshot(settings: TrainingSettings, args: Namespace) -> dict[str, Any]:
@@ -190,7 +207,12 @@ def resolved_snapshot(settings: TrainingSettings, args: Namespace) -> dict[str, 
 
 
 def run_training(settings: TrainingSettings, *, dry_run: bool = False) -> Namespace:
-    args = build_training_args(settings, validate_files=not dry_run)
+    started_at = datetime.now()
+    args = build_training_args(
+        settings,
+        validate_files=not dry_run,
+        started_at=started_at,
+    )
     snapshot = resolved_snapshot(settings, args)
     if dry_run:
         print(yaml.safe_dump(snapshot, sort_keys=False))
@@ -202,6 +224,7 @@ def run_training(settings: TrainingSettings, *, dry_run: bool = False) -> Namesp
         yaml.safe_dump(snapshot, handle, sort_keys=False)
 
     print(json.dumps(_jsonable_args(args), indent=2, sort_keys=True))
+    ensure_energy_reference(args, settings.reference)
     load_training_backend().main(args)
     return args
 

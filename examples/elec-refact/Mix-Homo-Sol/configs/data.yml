@@ -1,0 +1,27 @@
+data:
+  train_file:
+    - ${variables.data_root}/train_mixedsol_bulk_0_100_100_from_AIMD_lambda0_withdel.xyz
+    - ${variables.data_root}/train_mixedsol_bulk_0_100_100_from_AIMD_lambda0_withoutdel.xyz
+    - ${variables.data_root}/train_mixedsol_bulk_100_1000_100_from_AIMD_lambda0_withdel.xyz
+    - ${variables.data_root}/train_mixedsol_bulk_100_1000_100_from_AIMD_lamda0_withoutdel.xyz
+    - ${variables.data_root}/train_mixedsol_bulk_from_MLPMD_lambda0+1_with_and_withoutdel.xyz
+    - ${variables.data_root}/train_mixedsol_interface_0_100_100_from_AIMD.xyz
+    - ${variables.data_root}/train_mixedsol_interface_100_1000_100_from_AIMD.xyz
+    - ${variables.data_root}/train_single_mixedsol_interface_enhanced.xyz
+    - ${variables.single_sol_data_root}/Li_bulk_lambda0_del.xyz
+    - ${variables.single_sol_data_root}/Li_bulk_lambda0.xyz
+    - ${variables.single_sol_data_root}/Li_bulk_lambda1_del.xyz
+    - ${variables.single_sol_data_root}/Li_bulk_lambda1.xyz
+    - ${variables.single_sol_data_root}/Li-bulk-lambda0_mdv1_del.xyz
+    - ${variables.single_sol_data_root}/Li-bulk-lambda0_mdv1.xyz
+    - ${variables.single_sol_data_root}/Li-surface.xyz
+  pair_train_file: null
+  test_file: null
+  energy_reference: ${variables.results_root}/mix-homo-sol/references/mattersim-1m-conservative-ase-pretrained-residual-ridge-alpha1p0.json
+  train_split: 0.9
+  shuffle: true
+  shuffle_seed: 42
+  batch_size: 4
+  num_workers: 4
+  pin_memory: false
+  max_parent_frame: null

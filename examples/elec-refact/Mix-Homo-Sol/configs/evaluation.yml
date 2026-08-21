@@ -1,0 +1,6 @@
+evaluation:
+  skip: true
+  device: ""
+  seed: 42
+  max_structures: null
+  max_force_plot_points: 200000

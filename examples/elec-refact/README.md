@@ -1,11 +1,12 @@
 # Electrolyte fine-tuning
 
-This directory provides YAML-composed training entry points for two electrolyte
-fine-tuning stages:
+This directory provides YAML-composed training entry points for three
+electrolyte dataset classes:
 
 - `Single-Sol`: fine-tune MatterSim on single-solvent electrolyte structures.
-- `Mix-LHCE`: continue fine-tuning a `Single-Sol` checkpoint on mixed-solvent
-  and localized-high-concentration electrolyte structures.
+- `Mix-Homo-Sol`: fine-tune on the eight homogeneous mixed-solvent files plus
+  the seven `Single-Sol` files.
+- `Mix-LHCE`: fine-tune on localized-high-concentration electrolyte structures.
 
 The numerical training implementation is shared. Scenario directories contain
 only their data, objective, checkpoint, logging, evaluation, and trainer
@@ -23,6 +24,7 @@ the component they affect:
 
 - `model`
 - `data`
+- `reference`
 - `objective`
 - `optimizer`
 - `scheduler`
@@ -41,6 +43,10 @@ PYTHONPATH=src python examples/elec-refact/Single-Sol/train.py --dry-run
 ```
 
 ```bash
+PYTHONPATH=src python examples/elec-refact/Mix-Homo-Sol/train.py --dry-run
+```
+
+```bash
 PYTHONPATH=src python examples/elec-refact/Mix-LHCE/train.py --dry-run
 ```
 
@@ -54,11 +60,41 @@ PYTHONPATH=src python examples/elec-refact/Single-Sol/train.py
 ```
 
 ```bash
+PYTHONPATH=src python examples/elec-refact/Mix-Homo-Sol/train.py
+```
+
+```bash
 PYTHONPATH=src python examples/elec-refact/Mix-LHCE/train.py
 ```
 
-The fully resolved configuration is saved as `resolved-config.yml` in the run
-directory.
+Raw training inputs are read only from `/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData`
+by default. Derived artifacts are written under
+`/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteResults`:
+
+```text
+ElectrolyteResults/
+  single-sol/
+    references/
+    <job-start-time>-<optimizer>/
+      resolved-config.yml
+      checkpoints/
+      logs/
+  mix-homo-sol/
+    references/
+    <job-start-time>-<optimizer>/
+  mix-LHCE/
+    references/
+    <job-start-time>-<optimizer>/
+```
+
+If a class-level energy reference is missing, the launcher computes it before
+training. The reference fits per-element contributions to
+`E_target - E_pretrained` using ridge regression without an intercept. It is
+then shared by jobs in the same dataset class. Set `reference.refit=true` to
+force regeneration.
+
+Every job saves its fully resolved settings and derived arguments as
+`resolved-config.yml` before reference generation or training begins.
 
 ## Select an optimizer
 

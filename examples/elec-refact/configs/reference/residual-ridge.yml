@@ -1,0 +1,8 @@
+reference:
+  auto_generate: true
+  refit: false
+  method: residual
+  baseline: ase_pretrained
+  regression: ridge
+  ridge_alpha: 1.0
+  device: cuda:0
