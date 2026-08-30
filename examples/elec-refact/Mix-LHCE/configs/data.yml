@@ -1,8 +1,8 @@
 data:
   train_file: ${variables.data_root}/train_mlpmd_bulk_interface.xyz
   pair_train_file: null
-  test_file: ${variables.data_root}/Li_electrolyte_Mix_all.xyz
-  energy_reference: ${variables.data_root}/references/mix_further_ft/from_with_enhance/bulk_interface/Li_electrolyte_Mix-mattersim-1m-MatterSim-v1.0.0-1M-conservative-mix-residual-ridge-alpha1p0.json
+  test_file: null
+  energy_reference: ${variables.results_root}/mix-LHCE/references/mattersim-1m-conservative-ase-pretrained-residual-ridge-alpha1p0.json
   train_split: 0.9
   shuffle: true
   shuffle_seed: 42

@@ -1,6 +1,7 @@
 includes:
   - ../../configs/model/mattersim-1m.yml
   - data.yml
+  - ../../configs/reference/residual-ridge.yml
   - objective.yml
   - ../../configs/optimizer/adamw.yml
   - ../../configs/scheduler/reduce-on-plateau.yml
@@ -11,10 +12,10 @@ includes:
   - evaluation.yml
 
 variables:
-  data_root: ${env:MIX_LHCE_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix}
-  single_sol_root: ${env:SINGLE_SOL_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-V1}
+  data_root: ${env:MIX_LHCE_DATA_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/mix-LHCE}
+  results_root: ${env:ELECTROLYTE_RESULTS_ROOT,/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteResults}
 
 experiment:
   name: mix-lhce
-  output_root: ${variables.data_root}/local_runs/elec-refact/Mix-LHCE
+  output_root: ${variables.results_root}/mix-LHCE
   output_dir: null

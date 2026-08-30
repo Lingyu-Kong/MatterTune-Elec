@@ -1,0 +1,9 @@
+objective:
+  energy_weight: 200.0
+  force_weight: 20.0
+  delta_energy_weight: 0.0
+  force_training_strategy: all
+  force_every_n_steps: 1
+  force_subset_key: force_train_mask
+  validation_force_mode: all
+  per_atom_energy_normalize: true
