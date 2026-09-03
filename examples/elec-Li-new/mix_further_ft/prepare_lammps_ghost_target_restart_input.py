@@ -31,167 +31,468 @@ def write_lammps_restart_input(
     restart_step_path: Path,
 ) -> None:
     if timestep_fs <= 0.0:
-        raise ValueError("timestep_fs must be positive")
+        raise ValueError(
+            "timestep_fs must be positive"
+        )
+
     if friction_fs_inv <= 0.0:
-        raise ValueError("friction_fs_inv must be positive")
+        raise ValueError(
+            "friction_fs_inv must be positive"
+        )
+
     if steps < 0:
-        raise ValueError("steps must be non-negative")
-    if steps_mode not in {"additional", "total"}:
-        raise ValueError("steps_mode must be 'additional' or 'total'")
-    if min(thermo_interval, dump_interval, xtc_dump_interval, restart_interval) <= 0:
-        raise ValueError("output and restart intervals must be positive")
-    if temperature_log_path is not None and temperature_log_interval <= 0:
-        raise ValueError("temperature_log_interval must be positive")
+        raise ValueError(
+            "steps must be non-negative"
+        )
+
+    if steps_mode not in {
+        "additional",
+        "total",
+    }:
+        raise ValueError(
+            "steps_mode must be "
+            "'additional' or 'total'"
+        )
+
+    if min(
+        thermo_interval,
+        dump_interval,
+        xtc_dump_interval,
+        restart_interval,
+    ) <= 0:
+        raise ValueError(
+            "output and restart intervals "
+            "must be positive"
+        )
+
+    if (
+        temperature_log_path is not None
+        and temperature_log_interval <= 0
+    ):
+        raise ValueError(
+            "temperature_log_interval "
+            "must be positive"
+        )
+
     if not pair_coeff_elements:
-        raise ValueError("pair_coeff_elements must not be empty")
+        raise ValueError(
+            "pair_coeff_elements "
+            "must not be empty"
+        )
 
-    timestep_ps = timestep_fs * 0.001
-    damping_ps = 1.0 / friction_fs_inv * 0.001
-    pair_coeff = " ".join(pair_coeff_elements)
+    timestep_ps = (
+        timestep_fs * 0.001
+    )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    damping_ps = (
+        1.0
+        / friction_fs_inv
+        * 0.001
+    )
 
-    with path.open("w", encoding="utf-8") as handle:
-        handle.write("units           metal\n")
-        handle.write("atom_style      atomic\n")
-        handle.write("boundary        p p p\n\n")
-        handle.write(f"variable        RESTART_PATH string {restart_path}\n")
-        handle.write(f"variable        MODEL_PATH string {model_path}\n\n")
-        handle.write("newton          on\n\n")
+    pair_coeff = " ".join(
+        pair_coeff_elements
+    )
 
-        handle.write("read_restart    ${RESTART_PATH}\n\n")
+    #
+    # IMPORTANT:
+    # All paths below refer to files inside the current
+    # lambda run directory. The LAMMPS input must therefore
+    # contain basenames only.
+    #
+    restart_name = (
+        restart_path.name
+    )
 
+    model_name = (
+        model_path.name
+    )
+
+    final_data_name = (
+        final_data_path.name
+    )
+
+    dump_name = (
+        dump_path.name
+    )
+
+    xtc_name = (
+        xtc_path.name
+    )
+
+    temperature_log_name = (
+        None
+        if temperature_log_path is None
+        else temperature_log_path.name
+    )
+
+    restart_name_1 = (
+        restart_path_1.name
+    )
+
+    restart_name_2 = (
+        restart_path_2.name
+    )
+
+    restart_step_name = (
+        restart_step_path.name
+    )
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write(
+            "units           metal\n"
+        )
+
+        handle.write(
+            "atom_style      atomic\n"
+        )
+
+        handle.write(
+            "boundary        p p p\n\n"
+        )
+
+        handle.write(
+            f"variable        RESTART_PATH string "
+            f"{restart_name}\n"
+        )
+
+        handle.write(
+            f"variable        MODEL_PATH string "
+            f"{model_name}\n\n"
+        )
+
+        handle.write(
+            "newton          on\n\n"
+        )
+
+        handle.write(
+            "read_restart    ${RESTART_PATH}\n\n"
+        )
+
+        #
         # read_restart restores the absolute LAMMPS timestep.
-        # Record it before the continuation starts so that the local
-        # energy-segment steps can later be converted to absolute steps.
-        handle.write("variable        fep_ti_restart_step equal step\n")
+        #
+        # Record it before the continuation starts so the
+        # local FEP-TI energy segment can later be converted
+        # back to absolute steps.
+        #
+        handle.write(
+            "variable        fep_ti_restart_step equal step\n"
+        )
+
         handle.write(
             f'print           "${{fep_ti_restart_step}}" '
-            f'file {restart_step_path} screen no\n\n'
+            f"file {restart_step_name} "
+            "screen no\n\n"
         )
 
-        # Recreate ML-IAP explicitly: its Python model is not recoverable
-        # from a binary LAMMPS restart in a fresh process.
-        handle.write("pair_style      mliap unified ${MODEL_PATH}\n")
-        handle.write(f"pair_coeff      * * {pair_coeff}\n\n")
+        #
+        # ML-IAP must be recreated explicitly after read_restart.
+        #
+        handle.write(
+            "pair_style      mliap unified "
+            "${MODEL_PATH}\n"
+        )
 
-        handle.write(f"timestep        {timestep_ps:.12g}\n")
-        handle.write("fix             int all nve\n")
+        handle.write(
+            f"pair_coeff      * * "
+            f"{pair_coeff}\n\n"
+        )
+
+        handle.write(
+            f"timestep        "
+            f"{timestep_ps:.12g}\n"
+        )
+
+        handle.write(
+            "fix             int all nve\n"
+        )
+
         handle.write(
             f"fix             therm all temp/csvr "
-            f"{temperature:.12g} {temperature:.12g} "
-            f"{damping_ps:.12g} {seed + 7919}\n\n"
+            f"{temperature:.12g} "
+            f"{temperature:.12g} "
+            f"{damping_ps:.12g} "
+            f"{seed + 7919}\n\n"
         )
 
-        handle.write("neighbor        2.0 bin\n")
-        handle.write("neigh_modify    every 1 delay 0 check yes\n\n")
+        handle.write(
+            "neighbor        2.0 bin\n"
+        )
 
-        if temperature_log_path is not None:
-            handle.write("variable        fep_ti_log_step equal step\n")
-            handle.write("variable        fep_ti_log_temp equal temp\n")
+        handle.write(
+            "neigh_modify    every 1 "
+            "delay 0 check yes\n\n"
+        )
+
+        if (
+            temperature_log_name
+            is not None
+        ):
+            handle.write(
+                "variable        fep_ti_log_step equal step\n"
+            )
+
+            handle.write(
+                "variable        fep_ti_log_temp equal temp\n"
+            )
+
             handle.write(
                 f"fix             fep_ti_temp_log all print "
                 f"{temperature_log_interval} "
-                f'"${{fep_ti_log_step}},${{fep_ti_log_temp}}" append '
-                f'{temperature_log_path} screen no title ""\n\n'
+                f'"${{fep_ti_log_step}},'
+                f'${{fep_ti_log_temp}}" '
+                f"append {temperature_log_name} "
+                'screen no title ""\n\n'
             )
 
-        handle.write(f"thermo          {thermo_interval}\n")
-        handle.write("thermo_style    custom step temp pe ke etotal press\n")
-        handle.write("thermo_modify   flush yes\n\n")
+        handle.write(
+            f"thermo          "
+            f"{thermo_interval}\n"
+        )
 
         handle.write(
-            f"restart         {restart_interval} "
-            f"{restart_path_1} {restart_path_2}\n\n"
+            "thermo_style    custom "
+            "step temp pe ke etotal press\n"
+        )
+
+        handle.write(
+            "thermo_modify   flush yes\n\n"
+        )
+
+        handle.write(
+            f"restart         "
+            f"{restart_interval} "
+            f"{restart_name_1} "
+            f"{restart_name_2}\n\n"
         )
 
         if steps > 0:
             handle.write(
-                f"dump            traj all custom {dump_interval} "
-                f"{dump_path} id type x y z\n"
+                f"dump            traj all custom "
+                f"{dump_interval} "
+                f"{dump_name} "
+                "id type x y z\n"
             )
-            handle.write("dump_modify     traj sort id\n")
+
+            handle.write(
+                "dump_modify     traj sort id\n"
+            )
 
             handle.write(
                 f"dump            xtc_traj all xtc "
-                f"{xtc_dump_interval} {xtc_path}\n"
+                f"{xtc_dump_interval} "
+                f"{xtc_name}\n"
             )
-            handle.write("dump_modify     xtc_traj sort id\n")
 
-            if steps_mode == "total":
-                handle.write(f"run             {steps} upto\n")
+            handle.write(
+                "dump_modify     xtc_traj sort id\n"
+            )
+
+            if (
+                steps_mode
+                == "total"
+            ):
+                handle.write(
+                    f"run             "
+                    f"{steps} upto\n"
+                )
+
             else:
-                handle.write(f"run             {steps}\n")
+                handle.write(
+                    f"run             "
+                    f"{steps}\n"
+                )
 
-            handle.write("undump          traj\n")
-            handle.write("undump          xtc_traj\n")
+            handle.write(
+                "undump          traj\n"
+            )
+
+            handle.write(
+                "undump          xtc_traj\n"
+            )
+
         else:
-            handle.write("run             0\n")
+            handle.write(
+                "run             0\n"
+            )
 
-        handle.write(f"write_data      {final_data_path}\n")
+        handle.write(
+            f"write_data      "
+            f"{final_data_name}\n"
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare a LAMMPS input that continues ghost-target "
-            "FEP-TI from a restart file."
+            "Prepare a LAMMPS input that continues "
+            "ghost-target FEP-TI from a restart file."
         )
     )
 
-    parser.add_argument("--restart", type=Path, required=True)
-    parser.add_argument("--source-metadata", type=Path, required=True)
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument(
+        "--restart",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--source-metadata",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--metadata",
+        type=Path,
+        required=True,
+    )
 
     parser.add_argument(
         "--restart-step-file",
         type=Path,
         required=True,
         help=(
-            "File where the generated LAMMPS input writes the absolute "
-            "timestep restored by read_restart."
+            "File where the generated LAMMPS input "
+            "writes the absolute timestep restored "
+            "by read_restart."
         ),
     )
 
-    parser.add_argument("--temperature", type=float, default=298.15)
-    parser.add_argument("--timestep-fs", type=float, default=1.0)
-    parser.add_argument("--friction-fs-inv", type=float, default=0.02)
-    parser.add_argument("--steps", type=int, default=100000)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=298.15,
+    )
+
+    parser.add_argument(
+        "--timestep-fs",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--friction-fs-inv",
+        type=float,
+        default=0.02,
+    )
+
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=100000,
+    )
 
     parser.add_argument(
         "--steps-mode",
-        choices=("additional", "total"),
+        choices=(
+            "additional",
+            "total",
+        ),
         default="total",
         help=(
-            "total: run until the absolute production timestep reaches "
-            "--steps; additional: run --steps more steps from the restart."
+            "total: run until the absolute production "
+            "timestep reaches --steps; "
+            "additional: run --steps more steps "
+            "from the restart."
         ),
     )
 
-    parser.add_argument("--thermo-interval", type=int, default=100)
-    parser.add_argument("--dump-interval", type=int, default=100)
-    parser.add_argument("--xtc-dump-interval", type=int, default=500)
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--thermo-interval",
+        type=int,
+        default=100,
+    )
 
-    parser.add_argument("--final-data", type=Path, required=True)
-    parser.add_argument("--dump", type=Path, required=True)
-    parser.add_argument("--xtc-dump", type=Path, required=True)
+    parser.add_argument(
+        "--dump-interval",
+        type=int,
+        default=100,
+    )
 
-    parser.add_argument("--temperature-log", type=Path, default=None)
-    parser.add_argument("--temperature-log-interval", type=int, default=1)
+    parser.add_argument(
+        "--xtc-dump-interval",
+        type=int,
+        default=500,
+    )
 
-    parser.add_argument("--restart-interval", type=int, default=1000)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=7,
+    )
+
+    parser.add_argument(
+        "--final-data",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--dump",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--xtc-dump",
+        type=Path,
+        required=True,
+    )
+
+    parser.add_argument(
+        "--temperature-log",
+        type=Path,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--temperature-log-interval",
+        type=int,
+        default=1,
+    )
+
+    parser.add_argument(
+        "--restart-interval",
+        type=int,
+        default=1000,
+    )
+
     parser.add_argument(
         "--restart-path-1",
         type=Path,
-        default=Path("lmp.restart.1"),
+        default=Path(
+            "lmp.restart.1"
+        ),
     )
+
     parser.add_argument(
         "--restart-path-2",
         type=Path,
-        default=Path("lmp.restart.2"),
+        default=Path(
+            "lmp.restart.2"
+        ),
     )
 
     return parser.parse_args()
@@ -201,89 +502,215 @@ def main() -> None:
     args = parse_args()
 
     source_metadata = json.loads(
-        args.source_metadata.read_text(encoding="utf-8")
+        args.source_metadata.read_text(
+            encoding="utf-8"
+        )
     )
 
-    pair_coeff_elements = source_metadata.get("pair_coeff_elements")
+    pair_coeff_elements = (
+        source_metadata.get(
+            "pair_coeff_elements"
+        )
+    )
 
-    if not isinstance(pair_coeff_elements, list) or not all(
-        isinstance(item, str) for item in pair_coeff_elements
+    if (
+        not isinstance(
+            pair_coeff_elements,
+            list,
+        )
+        or not all(
+            isinstance(
+                item,
+                str,
+            )
+            for item in pair_coeff_elements
+        )
     ):
         raise ValueError(
-            f"{args.source_metadata} does not contain "
-            "a valid pair_coeff_elements list"
+            f"{args.source_metadata} "
+            "does not contain a valid "
+            "pair_coeff_elements list"
         )
 
+    #
+    # Do NOT use Path.resolve().
+    #
+    # The runner may pass absolute paths to this Python
+    # script, but generated LAMMPS input references must
+    # remain basename-only for portability.
+    #
     write_lammps_restart_input(
         path=args.input,
-        restart_path=args.restart.resolve(),
-        model_path=args.model.resolve(),
-        pair_coeff_elements=pair_coeff_elements,
-        temperature=args.temperature,
-        timestep_fs=args.timestep_fs,
-        friction_fs_inv=args.friction_fs_inv,
-        steps=args.steps,
-        steps_mode=args.steps_mode,
-        thermo_interval=args.thermo_interval,
-        dump_interval=args.dump_interval,
-        xtc_dump_interval=args.xtc_dump_interval,
-        seed=args.seed,
-        final_data_path=args.final_data.resolve(),
-        dump_path=args.dump.resolve(),
-        xtc_path=args.xtc_dump.resolve(),
-        temperature_log_path=(
-            None
-            if args.temperature_log is None
-            else args.temperature_log.resolve()
+        restart_path=args.restart,
+        model_path=args.model,
+        pair_coeff_elements=(
+            pair_coeff_elements
         ),
-        temperature_log_interval=args.temperature_log_interval,
-        restart_interval=args.restart_interval,
-        restart_path_1=args.restart_path_1.resolve(),
-        restart_path_2=args.restart_path_2.resolve(),
-        restart_step_path=args.restart_step_file.resolve(),
+        temperature=(
+            args.temperature
+        ),
+        timestep_fs=(
+            args.timestep_fs
+        ),
+        friction_fs_inv=(
+            args.friction_fs_inv
+        ),
+        steps=(
+            args.steps
+        ),
+        steps_mode=(
+            args.steps_mode
+        ),
+        thermo_interval=(
+            args.thermo_interval
+        ),
+        dump_interval=(
+            args.dump_interval
+        ),
+        xtc_dump_interval=(
+            args.xtc_dump_interval
+        ),
+        seed=(
+            args.seed
+        ),
+        final_data_path=(
+            args.final_data
+        ),
+        dump_path=(
+            args.dump
+        ),
+        xtc_path=(
+            args.xtc_dump
+        ),
+        temperature_log_path=(
+            args.temperature_log
+        ),
+        temperature_log_interval=(
+            args.temperature_log_interval
+        ),
+        restart_interval=(
+            args.restart_interval
+        ),
+        restart_path_1=(
+            args.restart_path_1
+        ),
+        restart_path_2=(
+            args.restart_path_2
+        ),
+        restart_step_path=(
+            args.restart_step_file
+        ),
     )
 
     payload = {
-        "restart": str(args.restart),
-        "source_metadata": str(args.source_metadata),
-        "input": str(args.input),
-        "model": str(args.model),
-        "restart_step_file": str(args.restart_step_file),
-        "temperature": args.temperature,
-        "timestep_fs": args.timestep_fs,
-        "friction_fs_inv": args.friction_fs_inv,
-        "steps": args.steps,
-        "steps_mode": args.steps_mode,
-        "thermo_interval": args.thermo_interval,
-        "dump_interval": args.dump_interval,
-        "xtc_dump_interval": args.xtc_dump_interval,
-        "seed": args.seed,
-        "final_data": str(args.final_data),
-        "dump": str(args.dump),
-        "xtc_dump": str(args.xtc_dump),
+        "restart": str(
+            args.restart
+        ),
+        "source_metadata": str(
+            args.source_metadata
+        ),
+        "input": str(
+            args.input
+        ),
+        "model": str(
+            args.model
+        ),
+        "restart_step_file": str(
+            args.restart_step_file
+        ),
+        "temperature": (
+            args.temperature
+        ),
+        "timestep_fs": (
+            args.timestep_fs
+        ),
+        "friction_fs_inv": (
+            args.friction_fs_inv
+        ),
+        "steps": (
+            args.steps
+        ),
+        "steps_mode": (
+            args.steps_mode
+        ),
+        "thermo_interval": (
+            args.thermo_interval
+        ),
+        "dump_interval": (
+            args.dump_interval
+        ),
+        "xtc_dump_interval": (
+            args.xtc_dump_interval
+        ),
+        "seed": (
+            args.seed
+        ),
+        "final_data": str(
+            args.final_data
+        ),
+        "dump": str(
+            args.dump
+        ),
+        "xtc_dump": str(
+            args.xtc_dump
+        ),
         "temperature_log": (
             None
             if args.temperature_log is None
-            else str(args.temperature_log)
+            else str(
+                args.temperature_log
+            )
         ),
-        "temperature_log_interval": args.temperature_log_interval,
-        "restart_interval": args.restart_interval,
-        "restart_path_1": str(args.restart_path_1),
-        "restart_path_2": str(args.restart_path_2),
-        "pair_coeff_elements": pair_coeff_elements,
+        "temperature_log_interval": (
+            args.temperature_log_interval
+        ),
+        "restart_interval": (
+            args.restart_interval
+        ),
+        "restart_path_1": str(
+            args.restart_path_1
+        ),
+        "restart_path_2": str(
+            args.restart_path_2
+        ),
+        "pair_coeff_elements": (
+            pair_coeff_elements
+        ),
     }
 
-    args.metadata.parent.mkdir(parents=True, exist_ok=True)
+    args.metadata.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     args.metadata.write_text(
-        json.dumps(payload, indent=2),
+        json.dumps(
+            payload,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
-    print(f"wrote {args.input}")
-    print(f"wrote {args.metadata}")
-    print(f"restart={args.restart}")
-    print(f"restart_step_file={args.restart_step_file}")
-    print(f"xtc_dump={args.xtc_dump}")
+    print(
+        f"wrote {args.input}"
+    )
+
+    print(
+        f"wrote {args.metadata}"
+    )
+
+    print(
+        f"restart={args.restart}"
+    )
+
+    print(
+        "restart_step_file="
+        f"{args.restart_step_file}"
+    )
+
+    print(
+        f"xtc_dump={args.xtc_dump}"
+    )
 
 
 if __name__ == "__main__":
