@@ -13,12 +13,14 @@ CONDA_ENV="${CONDA_ENV:-mattersim-elec}"
 
 LMP_BIN="${LMP_BIN:-/net/csefiles/coc-fung-cluster/lingyu/miniconda3/envs/mattersim-elec/bin/lmp}"
 
-CKPT="${CKPT:-/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix/local_runs/mix_further_ft/from_with_enhance/all_mix/train_without_delta_e/model.ckpt}"
+CKPT="${CKPT:-/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix/local_runs/mix_further_ft/from_with_enhance/all_mix/train_without_delta_e/20260612-140234-mattersim-1m-MatterSim-v1p0p0-1M-conservative-train_without_delta_e-ew200p0-fw20p0-dew0/checkpoints/mattersim-MatterSim-v1.0.0-1M-conservative-train_without_delta_e-best.ckpt}"
 
-STRUCTURE="${STRUCTURE:-/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix/mixture_LHCE_system/top.pdb}"
+STRUCTURE="${STRUCTURE:-/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix/mixture_LHCE_system/top_pdb/case2-LiFSI-DME-TLE/case6-case2-LiFSI-DME-TLE-3.5-6.5/298K/top.pdb}"
 
-CONFIG_TYPE="${CONFIG_TYPE:-system}"
-RUN_ROOT="${RUN_ROOT:-${PWD}}"
+CONFIG_TYPE="${CONFIG_TYPE:-case6-case2-LiFSI-DME-TLE-3.5-6.5_298K}"
+
+RUN_ROOT="${RUN_ROOT:-/net/csefiles/coc-fung-cluster/lingyu/Li-electrolyte-Mix/local_runs/MD/lammps_fep_ti}"
+
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 
 RUN_DIR="${RUN_DIR:-}"
@@ -58,17 +60,31 @@ NO_COMPILE="${NO_COMPILE:-0}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 
 KOKKOS_GPUS="${KOKKOS_GPUS:-1}"
+
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES_VALUE:-${CUDA_VISIBLE_DEVICES:-}}"
 
 DRY_RUN="${DRY_RUN:-0}"
 RUN_MD="${RUN_MD:-1}"
 
+#
+# Internal implementation detail.
+#
+# Canonical FEP-TI logs are refreshed every two minutes while MD is running.
+# This is intentionally not exposed as a user option.
+#
+PERIODIC_MERGE_SECONDS=120
+PERIODIC_MERGE_PID=""
+
+
 usage() {
     cat <<'EOF'
 Usage:
-  run_lammps_fep_ti.sh --lambda-value VALUE [options]
+  bash examples/elec-Li-new/mix_further_ft/run_lammps_fep_ti.sh --lambda-value VALUE [options]
 
-Options:
+Required:
+  --lambda-value VALUE
+
+Common options:
   --checkpoint PATH
   --structure PATH
   --run-dir PATH
@@ -82,12 +98,10 @@ Options:
   --lj-cutoff A
   --cuda-visible-devices IDS
   --prepare-only
-  --force-export
-  --no-compile
   --dry-run
-  -h, --help
 EOF
 }
+
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -95,74 +109,92 @@ while [[ $# -gt 0 ]]; do
             LAMBDA_VALUE="$2"
             shift 2
             ;;
+
         --checkpoint|--ckpt)
             CKPT="$2"
             shift 2
             ;;
+
         --structure|--pdb)
             STRUCTURE="$2"
             shift 2
             ;;
+
         --run-dir)
             RUN_DIR="$2"
             shift 2
             ;;
+
         --steps)
             STEPS="$2"
             shift 2
             ;;
+
         --warmup-steps)
             WARMUP_STEPS="$2"
             shift 2
             ;;
+
         --temperature)
             TEMPERATURE="$2"
             shift 2
             ;;
+
         --timestep-fs)
             TIMESTEP_FS="$2"
             shift 2
             ;;
+
         --friction-fs-inv)
             FRICTION_FS_INV="$2"
             shift 2
             ;;
+
         --energy-log-interval)
             ENERGY_LOG_INTERVAL="$2"
             shift 2
             ;;
+
         --target-indices)
             TARGET_INDICES="$2"
             shift 2
             ;;
+
         --lj-cutoff)
             LJ_CUTOFF="$2"
             shift 2
             ;;
+
         --cuda-visible-devices)
             CUDA_VISIBLE_DEVICES_VALUE="$2"
             shift 2
             ;;
+
         --prepare-only|--no-run)
             RUN_MD=0
             shift
             ;;
+
         --force-export)
             FORCE_EXPORT=1
             shift
             ;;
+
         --no-compile)
             NO_COMPILE=1
             shift
             ;;
+
         --dry-run)
             DRY_RUN=1
             shift
             ;;
+
         -h|--help)
             usage
             exit 0
             ;;
+
         *)
             echo "Unknown argument: $1" >&2
             usage >&2
@@ -171,32 +203,46 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+
 if [[ -z "${LAMBDA_VALUE}" ]]; then
     echo "--lambda-value is required." >&2
     exit 2
 fi
+
 
 if [[ ! -f "${CONDA_SH}" ]]; then
     echo "Conda setup script not found: ${CONDA_SH}" >&2
     exit 1
 fi
 
+
 if [[ ! -f "${CKPT}" ]]; then
     echo "Checkpoint not found: ${CKPT}" >&2
     exit 1
 fi
+
 
 if [[ ! -f "${STRUCTURE}" ]]; then
     echo "Structure PDB not found: ${STRUCTURE}" >&2
     exit 1
 fi
 
+
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare_lammps_ghost_target_input.py"
+MERGE_SCRIPT="${SCRIPT_DIR}/merge_lammps_fep_ti_energy_log.py"
+
 
 if [[ ! -f "${PREPARE_SCRIPT}" ]]; then
     echo "Prepare script not found: ${PREPARE_SCRIPT}" >&2
     exit 1
 fi
+
+
+if [[ ! -f "${MERGE_SCRIPT}" ]]; then
+    echo "Merge script not found: ${MERGE_SCRIPT}" >&2
+    exit 1
+fi
+
 
 LAMBDA_TAG="$(
     python - "${LAMBDA_VALUE}" <<'PY'
@@ -204,19 +250,22 @@ import sys
 
 value = float(sys.argv[1])
 
-if value < 0.0 or value > 1.0:
+if not 0.0 <= value <= 1.0:
     raise SystemExit("lambda must be in [0,1]")
 
 print(f"lambda{int(round(value * 1000)):03d}")
 PY
 )"
 
+
 if [[ -z "${RUN_DIR}" ]]; then
     RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-${LAMBDA_TAG}-lammps"
 fi
 
+
 mkdir -p "${RUN_DIR}"
 RUN_DIR="$(cd "${RUN_DIR}" && pwd)"
+
 
 MODEL_PATH="${RUN_DIR}/ghost-target-${LAMBDA_TAG}-type${TARGET_TYPE}-rc${LJ_CUTOFF}.pt"
 
@@ -245,6 +294,7 @@ LOG_PATH="${RUN_DIR}/log.${LAMBDA_TAG}.lammps"
 
 CONFIG_PATH="${RUN_DIR}/run_lammps_fep_ti_config.txt"
 
+
 run_cmd() {
     printf '+'
     printf ' %q' "$@"
@@ -255,10 +305,12 @@ run_cmd() {
     fi
 }
 
+
 source "${CONDA_SH}"
 conda activate "${CONDA_ENV}"
 
 export PYTHONNOUSERSITE=1
+
 
 if [[ -d "${LAMMPS_PYTHON_DIR}/lammps/mliap" ]]; then
     export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${LAMMPS_PYTHON_DIR}:${PYTHONPATH:-}"
@@ -266,15 +318,11 @@ else
     export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${PYTHONPATH:-}"
 fi
 
+
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 fi
 
-#
-# Store external inputs as they are.
-# Store run-local files as basenames so the config itself can move
-# between clusters.
-#
 
 if [[ "${DRY_RUN}" != "1" ]]; then
     cat > "${CONFIG_PATH}" <<EOF
@@ -314,45 +362,45 @@ log_path=$(basename "${LOG_PATH}")
 cuda_visible_devices=${CUDA_VISIBLE_DEVICES_VALUE}
 kokkos_gpus=${KOKKOS_GPUS}
 EOF
-else
-    echo "[dry-run] would write ${CONFIG_PATH}"
 fi
+
 
 echo "RUN_DIR=${RUN_DIR}"
 echo "LAMBDA_VALUE=${LAMBDA_VALUE}"
 echo "TARGET_INDICES=${TARGET_INDICES}"
 echo "TARGET_TYPE=${TARGET_TYPE}"
-
 echo "CKPT=${CKPT}"
 echo "STRUCTURE=${STRUCTURE}"
-
-echo "MODEL_PATH=${MODEL_PATH}"
-echo "DATA_PATH=${DATA_PATH}"
-
 echo "DUMP_PATH=${DUMP_PATH}"
 echo "XTC_PATH=${XTC_PATH}"
 
+
 EXPORT_ARGS=()
+
 
 if [[ "${STRICT}" == "1" ]]; then
     EXPORT_ARGS+=(--strict)
 fi
 
+
 if [[ "${NO_COMPILE}" == "1" ]]; then
     EXPORT_ARGS+=(--no-compile)
 fi
+
 
 if [[ -f "${MODEL_PATH}" &&
       "${FORCE_EXPORT}" != "1" &&
       ! -f "${ENERGY_LOG_RAW_PATH}" ]]; then
 
-    echo "Existing model has no matching raw FEP-TI log."
+    echo "Existing model has no matching raw energy log."
     echo "Forcing model re-export."
 
     FORCE_EXPORT=1
 fi
 
-if [[ ! -f "${MODEL_PATH}" || "${FORCE_EXPORT}" == "1" ]]; then
+
+if [[ ! -f "${MODEL_PATH}" ||
+      "${FORCE_EXPORT}" == "1" ]]; then
 
     run_cmd \
         python \
@@ -374,13 +422,16 @@ else
     echo "Reusing existing model: ${MODEL_PATH}"
 fi
 
+
 INIT_ARGS=()
+
 
 if [[ "${INIT_VELOCITIES}" == "1" ]]; then
     INIT_ARGS+=(--init-velocities)
 else
     INIT_ARGS+=(--no-init-velocities)
 fi
+
 
 run_cmd \
     python \
@@ -412,23 +463,121 @@ run_cmd \
     --temperature-log-interval "${ENERGY_LOG_INTERVAL}" \
     "${INIT_ARGS[@]}"
 
+
 if [[ "${RUN_MD}" != "1" ]]; then
-    echo "Prepared files only; RUN_MD=${RUN_MD}"
+    echo "Prepared LAMMPS files; skipping MD because RUN_MD=${RUN_MD}."
     exit 0
 fi
+
 
 if [[ ! -x "${LMP_BIN}" ]]; then
     echo "LAMMPS binary not executable: ${LMP_BIN}" >&2
     exit 1
 fi
 
-#
-# Run from the lambda directory.
-#
+
+merge_energy_log_once() {
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        return 0
+    fi
+
+    if [[ ! -s "${ENERGY_LOG_RAW_PATH}" ]]; then
+        return 0
+    fi
+
+    python \
+        "${MERGE_SCRIPT}" \
+        --energy-log-raw "${ENERGY_LOG_RAW_PATH}" \
+        --temperature-log "${TEMPERATURE_LOG_PATH}" \
+        --output "${ENERGY_LOG_PATH}"
+}
+
+
+periodic_merge_loop() {
+    while true; do
+        sleep "${PERIODIC_MERGE_SECONDS}"
+
+        if [[ -s "${ENERGY_LOG_RAW_PATH}" ]]; then
+            python \
+                "${MERGE_SCRIPT}" \
+                --energy-log-raw "${ENERGY_LOG_RAW_PATH}" \
+                --temperature-log "${TEMPERATURE_LOG_PATH}" \
+                --output "${ENERGY_LOG_PATH}" \
+                --quiet \
+                || echo \
+                    "WARNING: periodic FEP-TI energy refresh failed." \
+                    >&2
+        fi
+    done
+}
+
+
+start_periodic_merge() {
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        return 0
+    fi
+
+    periodic_merge_loop &
+    PERIODIC_MERGE_PID=$!
+
+    echo "FEP-TI energy log auto-refresh enabled."
+}
+
+
+stop_periodic_merge() {
+    if [[ -z "${PERIODIC_MERGE_PID}" ]]; then
+        return 0
+    fi
+
+    kill "${PERIODIC_MERGE_PID}" \
+        2>/dev/null \
+        || true
+
+    wait "${PERIODIC_MERGE_PID}" \
+        2>/dev/null \
+        || true
+
+    PERIODIC_MERGE_PID=""
+}
+
+
+finalize() {
+    status=$?
+
+    trap - EXIT
+
+    set +e
+
+    stop_periodic_merge
+
+    merge_energy_log_once
+    merge_status=$?
+
+    if (( merge_status != 0 )); then
+        echo \
+            "WARNING: final FEP-TI energy merge failed " \
+            "with status ${merge_status}" \
+            >&2
+
+        if (( status == 0 )); then
+            status="${merge_status}"
+        fi
+    fi
+
+    exit "${status}"
+}
+
+
+trap finalize EXIT
+
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+
+start_periodic_merge
+
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-    echo "[dry-run] LAMMPS working directory: ${RUN_DIR}"
-
     run_cmd \
         "${LMP_BIN}" \
         -k on g "${KOKKOS_GPUS}" \
@@ -436,6 +585,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
         -pk kokkos newton on neigh half \
         -in "$(basename "${INPUT_PATH}")" \
         -log "$(basename "${LOG_PATH}")"
+
 else
     (
         cd "${RUN_DIR}"
@@ -451,40 +601,44 @@ else
     )
 fi
 
-if [[ "${DRY_RUN}" != "1" && -f "${ENERGY_LOG_RAW_PATH}" ]]; then
-    run_cmd \
-        python \
-        "${SCRIPT_DIR}/merge_lammps_fep_ti_energy_log.py" \
-        --energy-log-raw "${ENERGY_LOG_RAW_PATH}" \
-        --temperature-log "${TEMPERATURE_LOG_PATH}" \
-        --output "${ENERGY_LOG_PATH}"
-fi
 
-if [[ "${DRY_RUN}" != "1" && -f "${LOG_PATH}" ]]; then
+if [[ -f "${LOG_PATH}" ]]; then
     python - "${LOG_PATH}" <<'PY'
 import re
 import sys
 
-path = sys.argv[1]
+log_path = sys.argv[1]
 
 pattern = re.compile(
-    r"Loop time of ([0-9.eE+-]+) on .* for (\d+) steps"
+    r"Loop time of ([0-9.eE+-]+) "
+    r"on .* for (\d+) steps"
 )
 
 matches = []
 
-with open(path, encoding="utf-8", errors="replace") as handle:
+with open(
+    log_path,
+    encoding="utf-8",
+    errors="replace",
+) as handle:
     for line in handle:
         match = pattern.search(line)
 
         if not match:
             continue
 
-        seconds = float(match.group(1))
-        steps = int(match.group(2))
+        seconds = float(
+            match.group(1)
+        )
+
+        steps = int(
+            match.group(2)
+        )
 
         if steps > 0:
-            matches.append((seconds, steps))
+            matches.append(
+                (seconds, steps)
+            )
 
 if matches:
     seconds, steps = matches[-1]
@@ -494,6 +648,11 @@ if matches:
         f"{seconds * 1000.0 / steps:.6g}"
     )
 else:
-    print("production_ms_per_step=unavailable")
+    print(
+        "production_ms_per_step=unavailable"
+    )
 PY
 fi
+
+
+exit 0
