@@ -98,6 +98,7 @@ class TrainerSettings:
     accelerator: str = "gpu"
     devices: list[int] = field(default_factory=lambda: [0])
     strategy: str | None = None
+    num_nodes: int = 1
     precision: str = "32"
     max_epochs: int = 5000
     gradient_clip_val: float = 2.0
@@ -251,6 +252,8 @@ class TrainingSettings:
             raise ValueError("reference.ridge_alpha must be non-negative.")
         if self.trainer.max_epochs < 1:
             raise ValueError("trainer.max_epochs must be positive.")
+        if self.trainer.num_nodes < 1:
+            raise ValueError("trainer.num_nodes must be positive.")
         if not self.trainer.devices:
             raise ValueError("trainer.devices must not be empty.")
         if self.optimizer.lr <= 0.0:

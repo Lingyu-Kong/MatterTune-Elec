@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import importlib
 import json
+import os
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,16 @@ FORCE_TRAINING_STRATEGIES = ("all", "none", "every_n", "subset")
 VALIDATION_FORCE_MODES = ("all", "energy_only", "match_train")
 PAIR_ID_KEYS = ("delta_pair_id", "lambda_pair_id", "pair_id")
 PAIR_ROLE_KEYS = ("delta_pair_role", "lambda_pair_role", "pair_role")
+
+
+def is_global_zero_process() -> bool:
+    """Return whether this process may mutate shared run-level artifacts."""
+
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"]) == 0
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    node_rank = int(os.environ.get("NODE_RANK", os.environ.get("GROUP_RANK", "0")))
+    return local_rank == 0 and node_rank == 0
 
 
 def patch_lightning_cuda_matmul_precision_check() -> None:
@@ -344,6 +355,7 @@ def build_config(args: argparse.Namespace):
     hparams.trainer.max_epochs = args.max_epochs
     hparams.trainer.accelerator = args.accelerator
     hparams.trainer.devices = args.devices
+    hparams.trainer.num_nodes = getattr(args, "num_nodes", 1)
     if getattr(args, "strategy", None) is not None:
         hparams.trainer.strategy = args.strategy
     elif len(args.devices) > 1:
@@ -364,7 +376,11 @@ def build_config(args: argparse.Namespace):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     ckpt_name = f"{experiment_label(args)}-{args.training_mode}-best"
     ckpt_path = checkpoint_dir / f"{ckpt_name}.ckpt"
-    if ckpt_path.exists() and args.resume_checkpoint is None:
+    if (
+        is_global_zero_process()
+        and ckpt_path.exists()
+        and args.resume_checkpoint is None
+    ):
         ckpt_path.unlink()
     hparams.trainer.checkpoint = MC.ModelCheckpointConfig(
         monitor=args.monitor,
@@ -1385,6 +1401,9 @@ def main(args: argparse.Namespace) -> None:
 
     if args.skip_eval:
         rich.print("skip_eval set; skipping test-set evaluation.")
+        return
+
+    if not trainer.is_global_zero:
         return
 
     best_ckpt_path = trainer.checkpoint_callback.best_model_path

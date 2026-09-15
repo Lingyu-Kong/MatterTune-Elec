@@ -12,7 +12,8 @@ REFACT_ROOT = ROOT / "examples" / "elec-refact"
 sys.path.insert(0, str(REFACT_ROOT))
 
 from config_loader import load_training_settings  # noqa: E402
-from training import build_training_args  # noqa: E402
+import training  # noqa: E402
+from training import build_training_args, run_training  # noqa: E402
 
 
 SINGLE_CONFIG = REFACT_ROOT / "Single-Sol" / "configs" / "default.yml"
@@ -28,6 +29,8 @@ def test_single_sol_default_matches_existing_training_defaults():
     assert settings.experiment.name == "single-sol"
     assert settings.data.batch_size == 8
     assert settings.trainer.devices == [0, 1, 2, 3]
+    assert settings.trainer.num_nodes == 1
+    assert args.num_nodes == 1
     assert settings.optimizer.name == "adamw"
     assert settings.optimizer.lr == pytest.approx(8e-5)
     assert isinstance(settings.data.train_file, list)
@@ -48,7 +51,8 @@ def test_mix_homo_sol_uses_all_new_data_sources():
     args = build_training_args(settings, validate_files=True)
 
     assert settings.experiment.name == "mix-homo-sol"
-    assert settings.data.batch_size == 8
+    assert settings.data.batch_size == 4
+    assert settings.trainer.devices == [0, 1, 2, 3, 4, 5]
     assert isinstance(args.train_file, list)
     assert len(args.train_file) == 15
     assert all(path.is_file() for path in args.train_file)
@@ -64,7 +68,7 @@ def test_mix_homo_sol_uses_all_new_data_sources():
     assert settings.experiment.output_root.endswith("/ElectrolyteResults/mix-homo-sol")
 
 
-def test_mix_homo_sol_training_settings_match_single_sol():
+def test_mix_homo_sol_training_settings_match_except_resource_overrides():
     single = load_training_settings([SINGLE_CONFIG])
     mixed = load_training_settings([MIX_HOMO_CONFIG])
 
@@ -74,7 +78,6 @@ def test_mix_homo_sol_training_settings_match_single_sol():
         "objective",
         "optimizer",
         "scheduler",
-        "trainer",
         "checkpoint",
         "evaluation",
     ):
@@ -86,12 +89,30 @@ def test_mix_homo_sol_training_settings_match_single_sol():
         "train_split",
         "shuffle",
         "shuffle_seed",
-        "batch_size",
         "num_workers",
         "pin_memory",
         "max_parent_frame",
     ):
         assert getattr(mixed.data, field) == getattr(single.data, field)
+
+    assert mixed.data.batch_size == 4
+    assert single.data.batch_size == 8
+    assert mixed.trainer.devices == [0, 1, 2, 3, 4, 5]
+    assert single.trainer.devices == [0, 1, 2, 3]
+    for field in (
+        "accelerator",
+        "strategy",
+        "num_nodes",
+        "precision",
+        "max_epochs",
+        "gradient_clip_val",
+        "ema_decay",
+        "early_stopping_patience",
+        "early_stopping_min_delta",
+        "limit_train_batches",
+        "limit_val_batches",
+    ):
+        assert getattr(mixed.trainer, field) == getattr(single.trainer, field)
 
 
 def test_mix_lhce_has_no_legacy_run_dependency():
@@ -130,6 +151,7 @@ def test_dotted_overrides_are_typed_by_yaml():
             "optimizer.name=adam",
             "optimizer.lr=5e-5",
             "trainer.devices=[1, 3]",
+            "trainer.num_nodes=2",
             "logging.offline=true",
         ),
     )
@@ -137,7 +159,65 @@ def test_dotted_overrides_are_typed_by_yaml():
     assert settings.optimizer.name == "adam"
     assert settings.optimizer.lr == pytest.approx(5e-5)
     assert settings.trainer.devices == [1, 3]
+    assert settings.trainer.num_nodes == 2
     assert settings.logging.offline is True
+
+
+def test_num_nodes_is_forwarded_to_backend_config(tmp_path):
+    settings = load_training_settings(
+        [SINGLE_CONFIG],
+        overrides=("trainer.num_nodes=2",),
+    )
+    settings.experiment.output_dir = str(tmp_path / "two-node-run")
+    args = build_training_args(settings, validate_files=False)
+
+    config = training.load_training_backend().build_config(args)
+
+    assert args.num_nodes == 2
+    assert config.trainer.num_nodes == 2
+
+
+def test_num_nodes_must_be_positive():
+    with pytest.raises(ValueError, match="trainer.num_nodes must be positive"):
+        load_training_settings(
+            [SINGLE_CONFIG],
+            overrides=("trainer.num_nodes=0",),
+        )
+
+
+def test_prepare_reference_only_does_not_start_training(monkeypatch):
+    settings = load_training_settings([SINGLE_CONFIG])
+    calls: list[tuple[object, object]] = []
+    backend = training.load_training_backend()
+
+    monkeypatch.setattr(
+        training,
+        "ensure_energy_reference",
+        lambda args, reference: calls.append((args, reference)),
+    )
+
+    def fail_if_training_starts(args):
+        raise AssertionError("training backend should not run during reference setup")
+
+    monkeypatch.setattr(backend, "main", fail_if_training_starts)
+
+    args = run_training(settings, prepare_reference_only=True)
+
+    assert calls == [(args, settings.reference)]
+
+
+def test_nonzero_rank_does_not_write_resolved_snapshot(monkeypatch, tmp_path):
+    settings = load_training_settings([SINGLE_CONFIG])
+    settings.experiment.output_dir = str(tmp_path / "distributed-run")
+    backend = training.load_training_backend()
+
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setattr(training, "ensure_energy_reference", lambda *_: None)
+    monkeypatch.setattr(backend, "main", lambda *_: None)
+
+    run_training(settings)
+
+    assert not (Path(settings.experiment.output_dir) / "resolved-config.yml").exists()
 
 
 def test_environment_interpolation_changes_data_root(monkeypatch, tmp_path):

@@ -122,3 +122,48 @@ PYTHONPATH=src python examples/elec-refact/Single-Sol/train.py \
 
 An additional YAML overlay is preferable when a setting should be reused or
 committed as an experiment definition.
+
+## Submit multi-GPU PBS jobs
+
+Two PBS scripts launch any of the three scenarios with one process per GPU.
+Both default to `Mix-Homo-Sol`, eight A100 GPUs per node, 40 CPUs and 200 GB
+of memory per node, and a 24-hour wall time:
+
+```bash
+qsub examples/elec-refact/run_single_node_multi_gpu.pbs
+```
+
+```bash
+qsub examples/elec-refact/run_multi_node_multi_gpu.pbs
+```
+
+Select another scenario with a PBS environment variable:
+
+```bash
+qsub -v SCENARIO=Single-Sol \
+  examples/elec-refact/run_multi_node_multi_gpu.pbs
+```
+
+Supported values are `Single-Sol`, `Mix-Homo-Sol`, and `Mix-LHCE`. Additional
+configuration overlays can be passed as a colon-separated list of paths:
+
+```bash
+qsub -v SCENARIO=Mix-Homo-Sol,CONFIG_OVERLAYS=examples/elec-refact/configs/optimizer/muon.yml \
+  examples/elec-refact/run_single_node_multi_gpu.pbs
+```
+
+The scripts also accept `RUN_NAME`, `OUTPUT_DIR`, `MATTERTUNE_DIR`,
+`CONDA_SH`, `CONDA_ENV`, `GPUS_PER_NODE`, and (for multi-node runs)
+`MASTER_PORT`. Existing data-root variables such as `SINGLE_SOL_DATA_ROOT`
+and `MIX_LHCE_DATA_ROOT` are forwarded to every node. Use `DRY_RUN=1` to
+print the resolved preparation and launch commands without checking GPUs,
+data, or starting training.
+
+If the resource request is changed with `qsub -l`, set `GPUS_PER_NODE` to the
+number of GPUs allocated on each node. The multi-node script derives its node
+count from `PBS_NODEFILE`; all nodes must see the repository, data, and output
+directories through a shared filesystem.
+
+Before distributed workers start, each script runs a serial
+`--prepare-reference-only` step. This creates or validates the shared residual
+energy reference once, preventing every distributed rank from fitting it.

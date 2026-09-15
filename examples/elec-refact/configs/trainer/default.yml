@@ -2,6 +2,7 @@ trainer:
   accelerator: gpu
   devices: [0]
   strategy: null
+  num_nodes: 1
   precision: "32"
   max_epochs: 5000
   gradient_clip_val: 2.0

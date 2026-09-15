@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+#PBS -N elec-refact-2n8g
+#PBS -q v1_a100
+#PBS -l select=2:ncpus=40:mpiprocs=1:ngpus=8:mem=200gb:gpu_type=A100
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+readonly DEFAULT_MATTERTUNE_DIR="/nethome/lkong88/workspace/Electrolyte/MatterTune"
+readonly DEFAULT_CONDA_SH="/net/csefiles/coc-fung-cluster/lingyu/miniconda3/etc/profile.d/conda.sh"
+readonly DEFAULT_RESULTS_ROOT="/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteResults"
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+print_command() {
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+[[ -n "${PBS_JOBID:-}" ]] || die "PBS_JOBID is not set; submit this script with qsub."
+[[ -f "${PBS_NODEFILE:-}" ]] || die "PBS_NODEFILE is not set or does not exist."
+
+if [[ -d "${PBS_O_WORKDIR:-}/examples/elec-refact" ]]; then
+  DEFAULT_JOB_DIR="${PBS_O_WORKDIR}"
+else
+  DEFAULT_JOB_DIR="${DEFAULT_MATTERTUNE_DIR}"
+fi
+MATTERTUNE_DIR="${MATTERTUNE_DIR:-${DEFAULT_JOB_DIR}}"
+CONDA_SH="${CONDA_SH:-${DEFAULT_CONDA_SH}}"
+CONDA_ENV="${CONDA_ENV:-mattersim-elec}"
+CUDA_MODULE="${CUDA_MODULE:-CUDA/12.1.1}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+SCENARIO="${SCENARIO:-Mix-Homo-Sol}"
+CONFIG_OVERLAYS="${CONFIG_OVERLAYS:-}"
+MASTER_PORT="${MASTER_PORT:-29500}"
+DRY_RUN="${DRY_RUN:-0}"
+OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+[[ "${GPUS_PER_NODE}" =~ ^[1-9][0-9]*$ ]] || die "GPUS_PER_NODE must be a positive integer."
+[[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] && (( MASTER_PORT >= 1024 && MASTER_PORT <= 65535 )) || die "MASTER_PORT must be between 1024 and 65535."
+[[ -d "${MATTERTUNE_DIR}/examples/elec-refact" ]] || die "MatterTune repository not found: ${MATTERTUNE_DIR}"
+[[ -f "${CONDA_SH}" ]] || die "Conda setup script not found: ${CONDA_SH}"
+
+case "${SCENARIO,,}" in
+  single-sol|single_sol|single)
+    SCENARIO="Single-Sol"
+    RESULT_SUBDIR="single-sol"
+    ;;
+  mix-homo-sol|mix_homo_sol|mix-homo|mix_homo)
+    SCENARIO="Mix-Homo-Sol"
+    RESULT_SUBDIR="mix-homo-sol"
+    ;;
+  mix-lhce|mix_lhce|lhce)
+    SCENARIO="Mix-LHCE"
+    RESULT_SUBDIR="mix-LHCE"
+    ;;
+  *)
+    die "Unsupported SCENARIO=${SCENARIO}; expected Single-Sol, Mix-Homo-Sol, or Mix-LHCE."
+    ;;
+esac
+
+UNIQUE_NODEFILE="$(mktemp "${TMPDIR:-/tmp}/elec-refact-nodes.XXXXXX")"
+trap 'rm -f "${UNIQUE_NODEFILE}"' EXIT
+awk '!seen[$0]++' "${PBS_NODEFILE}" > "${UNIQUE_NODEFILE}"
+NNODES="$(wc -l < "${UNIQUE_NODEFILE}")"
+[[ "${NNODES}" -ge 2 ]] || die "Multi-node script requires at least two allocated nodes; got ${NNODES}."
+MASTER_ADDR="$(head -n 1 "${UNIQUE_NODEFILE}")"
+WORLD_SIZE="$((NNODES * GPUS_PER_NODE))"
+
+ELECTROLYTE_RESULTS_ROOT="${ELECTROLYTE_RESULTS_ROOT:-${DEFAULT_RESULTS_ROOT}}"
+SINGLE_SOL_DATA_ROOT="${SINGLE_SOL_DATA_ROOT:-/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/single-sol}"
+MIX_HOMO_SOL_DATA_ROOT="${MIX_HOMO_SOL_DATA_ROOT:-/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/mix-homogeneous-sol}"
+MIX_LHCE_DATA_ROOT="${MIX_LHCE_DATA_ROOT:-/net/csefiles/coc-fung-cluster/lingyu/ElectrolyteData/mix-LHCE}"
+export ELECTROLYTE_RESULTS_ROOT SINGLE_SOL_DATA_ROOT MIX_HOMO_SOL_DATA_ROOT MIX_LHCE_DATA_ROOT
+
+JOB_NUMBER="${PBS_JOBID%%.*}"
+RUN_NAME="${RUN_NAME:-$(date +%Y%m%d-%H%M%S)-pbs${JOB_NUMBER}-${RESULT_SUBDIR}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ELECTROLYTE_RESULTS_ROOT}/${RESULT_SUBDIR}/${RUN_NAME}}"
+ENTRYPOINT="examples/elec-refact/${SCENARIO}/train.py"
+
+source "${CONDA_SH}"
+conda activate "${CONDA_ENV}"
+if command -v module >/dev/null 2>&1 && [[ -n "${CUDA_MODULE}" ]]; then
+  module load "${CUDA_MODULE}" || echo "WARNING: could not load ${CUDA_MODULE}; continuing with the active environment." >&2
+fi
+
+cd "${MATTERTUNE_DIR}"
+export PYTHONPATH="${MATTERTUNE_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export OMP_NUM_THREADS
+
+PYTHON_BIN="$(command -v python || true)"
+TORCHRUN_BIN="$(command -v torchrun || true)"
+MPIEXEC_BIN="$(command -v mpiexec || true)"
+[[ -x "${PYTHON_BIN}" ]] || die "python is unavailable after activating ${CONDA_ENV}."
+[[ -x "${TORCHRUN_BIN}" ]] || die "torchrun is unavailable after activating ${CONDA_ENV}."
+[[ -x "${MPIEXEC_BIN}" ]] || die "mpiexec is unavailable after activating ${CONDA_ENV}."
+
+OVERLAY_ARGS=()
+if [[ -n "${CONFIG_OVERLAYS}" ]]; then
+  IFS=':' read -r -a OVERLAY_PATHS <<< "${CONFIG_OVERLAYS}"
+  for overlay in "${OVERLAY_PATHS[@]}"; do
+    [[ -n "${overlay}" ]] || continue
+    if [[ "${overlay}" != /* ]]; then
+      overlay="${MATTERTUNE_DIR}/${overlay}"
+    fi
+    [[ -f "${overlay}" ]] || die "Configuration overlay not found: ${overlay}"
+    OVERLAY_ARGS+=(--config "${overlay}")
+  done
+fi
+
+DEVICE_CSV="$(seq -s, 0 "$((GPUS_PER_NODE - 1))")"
+COMMON_ARGS=(
+  "${ENTRYPOINT}"
+  "${OVERLAY_ARGS[@]}"
+  --set "experiment.output_dir=${OUTPUT_DIR}"
+  --set "logging.run_name=${RUN_NAME}"
+)
+PREPARE_CMD=(
+  "${PYTHON_BIN}"
+  "${COMMON_ARGS[@]}"
+  --set 'trainer.devices=[0]'
+  --set 'trainer.num_nodes=1'
+  --prepare-reference-only
+)
+TRAIN_ARGS=(
+  "${COMMON_ARGS[@]}"
+  --set "trainer.devices=[${DEVICE_CSV}]"
+  --set "trainer.num_nodes=${NNODES}"
+  --set 'trainer.strategy=ddp'
+  --set 'reference.refit=false'
+)
+MPI_PREFIX=(
+  "${MPIEXEC_BIN}"
+  --hostfile "${UNIQUE_NODEFILE}"
+  --map-by ppr:1:node
+  --bind-to none
+  -np "${NNODES}"
+  -x PATH
+  -x PYTHONPATH
+  -x OMP_NUM_THREADS
+  -x ELECTROLYTE_RESULTS_ROOT
+  -x SINGLE_SOL_DATA_ROOT
+  -x MIX_HOMO_SOL_DATA_ROOT
+  -x MIX_LHCE_DATA_ROOT
+)
+TRAIN_CMD=(
+  "${MPI_PREFIX[@]}"
+  "${TORCHRUN_BIN}"
+  --nnodes="${NNODES}"
+  --nproc-per-node="${GPUS_PER_NODE}"
+  --rdzv-backend=c10d
+  --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}"
+  --rdzv-id="${PBS_JOBID}"
+  --max-restarts=0
+  "${TRAIN_ARGS[@]}"
+)
+
+echo "================ ELEC-REFACT PBS RUN ================"
+echo "scenario       = ${SCENARIO}"
+echo "nodes          = ${NNODES}"
+echo "node_list      = $(paste -sd, "${UNIQUE_NODEFILE}")"
+echo "gpus_per_node  = ${GPUS_PER_NODE}"
+echo "world_size     = ${WORLD_SIZE}"
+echo "master         = ${MASTER_ADDR}:${MASTER_PORT}"
+echo "conda_env      = ${CONDA_ENV}"
+echo "run_name       = ${RUN_NAME}"
+echo "output_dir     = ${OUTPUT_DIR}"
+echo "======================================================"
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+  echo "PREPARE_COMMAND"
+  print_command "${PREPARE_CMD[@]}"
+  echo "TRAIN_COMMAND"
+  print_command "${TRAIN_CMD[@]}"
+  exit 0
+fi
+
+case "${SCENARIO}" in
+  Single-Sol) [[ -d "${SINGLE_SOL_DATA_ROOT}" ]] || die "Single-Sol data directory not found: ${SINGLE_SOL_DATA_ROOT}" ;;
+  Mix-Homo-Sol)
+    [[ -d "${MIX_HOMO_SOL_DATA_ROOT}" ]] || die "Mix-Homo-Sol data directory not found: ${MIX_HOMO_SOL_DATA_ROOT}"
+    [[ -d "${SINGLE_SOL_DATA_ROOT}" ]] || die "Single-Sol data directory not found: ${SINGLE_SOL_DATA_ROOT}"
+    ;;
+  Mix-LHCE) [[ -d "${MIX_LHCE_DATA_ROOT}" ]] || die "Mix-LHCE data directory not found: ${MIX_LHCE_DATA_ROOT}" ;;
+esac
+
+echo "Checking GPU visibility on every allocated node..."
+"${MPI_PREFIX[@]}" bash -c '
+  available=$(nvidia-smi -L 2>/dev/null | awk '\''/^GPU / {count++} END {print count + 0}'\'')
+  if (( available < $1 )); then
+    echo "$(hostname): exposes ${available} GPUs; $1 required." >&2
+    exit 1
+  fi
+  echo "$(hostname): ${available} GPUs visible"
+' _ "${GPUS_PER_NODE}"
+
+mkdir -p "${OUTPUT_DIR}"
+echo "Preparing the shared energy reference on ${MASTER_ADDR}..."
+print_command "${PREPARE_CMD[@]}"
+"${PREPARE_CMD[@]}"
+
+echo "Starting multi-node distributed training..."
+print_command "${TRAIN_CMD[@]}"
+"${TRAIN_CMD[@]}"

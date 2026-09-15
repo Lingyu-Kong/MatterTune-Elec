@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from argparse import Namespace
 from dataclasses import asdict
@@ -118,6 +119,7 @@ def build_training_args(
         accelerator=settings.trainer.accelerator,
         devices=backend.normalize_devices(settings.trainer.devices),
         strategy=settings.trainer.strategy,
+        num_nodes=settings.trainer.num_nodes,
         precision=settings.trainer.precision,
         max_epochs=settings.trainer.max_epochs,
         gradient_clip_val=settings.trainer.gradient_clip_val,
@@ -206,7 +208,22 @@ def resolved_snapshot(settings: TrainingSettings, args: Namespace) -> dict[str, 
     }
 
 
-def run_training(settings: TrainingSettings, *, dry_run: bool = False) -> Namespace:
+def _is_global_zero() -> bool:
+    """Return whether this process owns shared setup and output side effects."""
+
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"]) == 0
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    node_rank = int(os.environ.get("NODE_RANK", os.environ.get("GROUP_RANK", "0")))
+    return local_rank == 0 and node_rank == 0
+
+
+def run_training(
+    settings: TrainingSettings,
+    *,
+    dry_run: bool = False,
+    prepare_reference_only: bool = False,
+) -> Namespace:
     started_at = datetime.now()
     args = build_training_args(
         settings,
@@ -218,12 +235,17 @@ def run_training(settings: TrainingSettings, *, dry_run: bool = False) -> Namesp
         print(yaml.safe_dump(snapshot, sort_keys=False))
         return args
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_path = args.output_dir / "resolved-config.yml"
-    with snapshot_path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(snapshot, handle, sort_keys=False)
+    if prepare_reference_only:
+        ensure_energy_reference(args, settings.reference)
+        return args
 
-    print(json.dumps(_jsonable_args(args), indent=2, sort_keys=True))
+    if _is_global_zero():
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = args.output_dir / "resolved-config.yml"
+        with snapshot_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(snapshot, handle, sort_keys=False)
+        print(json.dumps(_jsonable_args(args), indent=2, sort_keys=True))
+
     ensure_energy_reference(args, settings.reference)
     load_training_backend().main(args)
     return args
@@ -252,9 +274,20 @@ def run_from_cli(default_config: str | Path, argv: list[str] | None = None) -> N
         action="store_true",
         help="Resolve and print the configuration without checking files or training.",
     )
+    parser.add_argument(
+        "--prepare-reference-only",
+        action="store_true",
+        help="Generate or validate the energy reference, then exit without training.",
+    )
     cli = parser.parse_args(argv)
+    if cli.dry_run and cli.prepare_reference_only:
+        parser.error("--dry-run and --prepare-reference-only are mutually exclusive.")
     settings = load_training_settings(
         [default_config, *cli.config],
         overrides=cli.overrides,
     )
-    run_training(settings, dry_run=cli.dry_run)
+    run_training(
+        settings,
+        dry_run=cli.dry_run,
+        prepare_reference_only=cli.prepare_reference_only,
+    )
