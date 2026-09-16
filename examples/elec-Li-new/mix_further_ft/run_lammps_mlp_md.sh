@@ -32,6 +32,9 @@ XTC_PATH="${XTC_PATH:-}"
 SEED="${SEED:-7}"
 INIT_VELOCITIES="${INIT_VELOCITIES:-1}"
 
+RESTART_FROM="${RESTART_FROM:-}"
+RESTART_INTERVAL="${RESTART_INTERVAL:-10000}"
+
 EXPORT_DEVICE="${EXPORT_DEVICE:-cpu}"
 STRICT="${STRICT:-0}"
 NO_COMPILE="${NO_COMPILE:-0}"
@@ -43,7 +46,7 @@ DRY_RUN="${DRY_RUN:-0}"
 RUN_MD="${RUN_MD:-1}"
 
 usage() {
-  cat <<'EOF'
+    cat <<'EOF'
 Usage:
   bash run_lammps_mlp_md.sh [options]
 
@@ -63,6 +66,8 @@ Options:
   --xtc-dump-interval N
   --xtc-path PATH
   --element-order LIST
+  --restart-from PATH
+  --restart-interval N
   --cuda-visible-devices IDS
   --prepare-only
   --no-run
@@ -75,52 +80,63 @@ EOF
 }
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --checkpoint|--ckpt) CKPT="$2"; shift 2 ;;
-    --structure|--pdb) STRUCTURE="$2"; shift 2 ;;
-    --run-dir) RUN_DIR="$2"; shift 2 ;;
-    --steps) STEPS="$2"; shift 2 ;;
-    --warmup-steps) WARMUP_STEPS="$2"; shift 2 ;;
-    --temperature) TEMPERATURE="$2"; shift 2 ;;
-    --timestep-fs) TIMESTEP_FS="$2"; shift 2 ;;
-    --friction-fs-inv) FRICTION_FS_INV="$2"; shift 2 ;;
-    --thermo-interval) THERMO_INTERVAL="$2"; shift 2 ;;
-    --dump-interval) DUMP_INTERVAL="$2"; shift 2 ;;
-    --xtc-dump-interval) XTC_DUMP_INTERVAL="$2"; shift 2 ;;
-    --xtc-path) XTC_PATH="$2"; shift 2 ;;
-    --element-order) ELEMENT_ORDER="$2"; shift 2 ;;
-    --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2 ;;
-    --prepare-only|--no-run) RUN_MD=0; shift ;;
-    --force-export) FORCE_EXPORT=1; shift ;;
-    --no-compile) NO_COMPILE=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
-  esac
+    case "$1" in
+        --checkpoint|--ckpt) CKPT="$2"; shift 2 ;;
+        --structure|--pdb) STRUCTURE="$2"; shift 2 ;;
+        --run-dir) RUN_DIR="$2"; shift 2 ;;
+        --steps) STEPS="$2"; shift 2 ;;
+        --warmup-steps) WARMUP_STEPS="$2"; shift 2 ;;
+        --temperature) TEMPERATURE="$2"; shift 2 ;;
+        --timestep-fs) TIMESTEP_FS="$2"; shift 2 ;;
+        --friction-fs-inv) FRICTION_FS_INV="$2"; shift 2 ;;
+        --thermo-interval) THERMO_INTERVAL="$2"; shift 2 ;;
+        --dump-interval) DUMP_INTERVAL="$2"; shift 2 ;;
+        --xtc-dump-interval) XTC_DUMP_INTERVAL="$2"; shift 2 ;;
+        --xtc-path) XTC_PATH="$2"; shift 2 ;;
+        --element-order) ELEMENT_ORDER="$2"; shift 2 ;;
+        --restart-from) RESTART_FROM="$2"; shift 2 ;;
+        --restart-interval) RESTART_INTERVAL="$2"; shift 2 ;;
+        --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2 ;;
+        --prepare-only|--no-run) RUN_MD=0; shift ;;
+        --force-export) FORCE_EXPORT=1; shift ;;
+        --no-compile) NO_COMPILE=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
 done
 
 if [[ ! -f "${CONDA_SH}" ]]; then
-  echo "Conda setup script not found: ${CONDA_SH}" >&2
-  exit 1
+    echo "Conda setup script not found: ${CONDA_SH}" >&2
+    exit 1
 fi
 
 if [[ ! -f "${CKPT}" ]]; then
-  echo "Checkpoint not found: ${CKPT}" >&2
-  exit 1
+    echo "Checkpoint not found: ${CKPT}" >&2
+    exit 1
 fi
 
 if [[ ! -f "${STRUCTURE}" ]]; then
-  echo "Structure PDB not found: ${STRUCTURE}" >&2
-  exit 1
+    echo "Structure PDB not found: ${STRUCTURE}" >&2
+    exit 1
 fi
 
 if [[ ! -f "${SCRIPT_DIR}/prepare_lammps_normal_input.py" ]]; then
-  echo "Prepare script not found: ${SCRIPT_DIR}/prepare_lammps_normal_input.py" >&2
-  exit 1
+    echo "Prepare script not found: ${SCRIPT_DIR}/prepare_lammps_normal_input.py" >&2
+    exit 1
+fi
+
+if [[ -n "${RESTART_FROM}" && ! -f "${RESTART_FROM}" ]]; then
+    echo "Restart file not found: ${RESTART_FROM}" >&2
+    exit 1
 fi
 
 if [[ -z "${RUN_DIR}" ]]; then
-  RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps"
+    if [[ -n "${RESTART_FROM}" ]]; then
+        RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps-restart"
+    else
+        RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps"
+    fi
 fi
 
 MODEL_PATH="${RUN_DIR}/mattertune-mattersim-normal.pt"
@@ -131,37 +147,48 @@ FINAL_DATA_PATH="${RUN_DIR}/final_normal.data"
 DUMP_PATH="${RUN_DIR}/traj_normal.lammpstrj"
 LOG_PATH="${RUN_DIR}/log.normal.lammps"
 CONFIG_PATH="${RUN_DIR}/run_lammps_mlp_md_config.txt"
+RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
+RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
+FINAL_RESTART_PATH="${RUN_DIR}/lmp.restart.final"
 
 if [[ -z "${XTC_PATH}" ]]; then
-  XTC_PATH="${RUN_DIR}/traj.xtc"
+    XTC_PATH="${RUN_DIR}/traj.xtc"
+fi
+
+if [[ -n "${RESTART_FROM}" ]]; then
+    RESTART_FROM="$(readlink -f "${RESTART_FROM}")"
+    WARMUP_STEPS=0
+    INIT_VELOCITIES=0
 fi
 
 run_cmd() {
-  printf '+'
-  printf ' %q' "$@"
-  printf '\n'
-  if [[ "${DRY_RUN}" != "1" ]]; then
-    "$@"
-  fi
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+    if [[ "${DRY_RUN}" != "1" ]]; then
+        "$@"
+    fi
 }
 
 source "${CONDA_SH}"
 conda activate "${CONDA_ENV}"
 
 export PYTHONNOUSERSITE=1
+
 if [[ -d "${LAMMPS_PYTHON_DIR}/lammps/mliap" ]]; then
-  export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${LAMMPS_PYTHON_DIR}:${PYTHONPATH:-}"
+    export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${LAMMPS_PYTHON_DIR}:${PYTHONPATH:-}"
 else
-  export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${PYTHONPATH:-}"
+    export PYTHONPATH="${MATTERSIM_DIR}/src:${MATTERTUNE_DIR}/src:${PYTHONPATH:-}"
 fi
+
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
-  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then
-  mkdir -p "${RUN_DIR}"
+    mkdir -p "${RUN_DIR}"
 
-  cat > "${CONFIG_PATH}" <<EOF
+    cat > "${CONFIG_PATH}" <<EOF
 created_at=$(date --iso-8601=seconds)
 checkpoint=${CKPT}
 structure=${STRUCTURE}
@@ -176,6 +203,11 @@ thermo_interval=${THERMO_INTERVAL}
 dump_interval=${DUMP_INTERVAL}
 xtc_dump_interval=${XTC_DUMP_INTERVAL}
 xtc_path=${XTC_PATH}
+restart_from=${RESTART_FROM}
+restart_interval=${RESTART_INTERVAL}
+restart_path_1=${RESTART_PATH_1}
+restart_path_2=${RESTART_PATH_2}
+final_restart_path=${FINAL_RESTART_PATH}
 model_path=${MODEL_PATH}
 data_path=${DATA_PATH}
 input_path=${INPUT_PATH}
@@ -187,7 +219,7 @@ cuda_visible_devices=${CUDA_VISIBLE_DEVICES_VALUE}
 kokkos_gpus=${KOKKOS_GPUS}
 EOF
 else
-  echo "[dry-run] would create ${RUN_DIR}"
+    echo "[dry-run] would create ${RUN_DIR}"
 fi
 
 echo "RUN_DIR=${RUN_DIR}"
@@ -200,83 +232,105 @@ echo "DUMP_PATH=${DUMP_PATH}"
 echo "XTC_PATH=${XTC_PATH}"
 echo "STEPS=${STEPS}"
 echo "WARMUP_STEPS=${WARMUP_STEPS}"
+echo "RESTART_FROM=${RESTART_FROM}"
+echo "RESTART_INTERVAL=${RESTART_INTERVAL}"
+echo "FINAL_RESTART_PATH=${FINAL_RESTART_PATH}"
 echo "THERMO_INTERVAL=${THERMO_INTERVAL}"
 echo "DUMP_INTERVAL=${DUMP_INTERVAL}"
 echo "XTC_DUMP_INTERVAL=${XTC_DUMP_INTERVAL}"
 echo "KOKKOS_GPUS=${KOKKOS_GPUS}"
 
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
-  echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_VALUE}"
+    echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_VALUE}"
 fi
 
 EXPORT_ARGS=()
 
 if [[ "${STRICT}" == "1" ]]; then
-  EXPORT_ARGS+=(--strict)
+    EXPORT_ARGS+=(--strict)
 fi
 
 if [[ "${NO_COMPILE}" == "1" ]]; then
-  EXPORT_ARGS+=(--no-compile)
+    EXPORT_ARGS+=(--no-compile)
 fi
 
 if [[ ! -f "${MODEL_PATH}" || "${FORCE_EXPORT}" == "1" ]]; then
-  run_cmd python "${MATTERTUNE_DIR}/examples/elec-Li-new/enhance-V1/export_mattersim_lammps_mliap.py" \
-    "${CKPT}" \
-    "${MODEL_PATH}" \
-    --device "${EXPORT_DEVICE}" \
-    "${EXPORT_ARGS[@]}"
+    run_cmd python "${MATTERTUNE_DIR}/examples/elec-Li-new/enhance-V1/export_mattersim_lammps_mliap.py" \
+        "${CKPT}" \
+        "${MODEL_PATH}" \
+        --device "${EXPORT_DEVICE}" \
+        "${EXPORT_ARGS[@]}"
 else
-  echo "Reusing existing model: ${MODEL_PATH}"
+    echo "Reusing existing model: ${MODEL_PATH}"
 fi
 
 INIT_ARGS=()
 
 if [[ "${INIT_VELOCITIES}" == "1" ]]; then
-  INIT_ARGS+=(--init-velocities)
+    INIT_ARGS+=(--init-velocities)
 else
-  INIT_ARGS+=(--no-init-velocities)
+    INIT_ARGS+=(--no-init-velocities)
+fi
+
+RESTART_ARGS=()
+
+if [[ -n "${RESTART_FROM}" ]]; then
+    RESTART_ARGS+=(--restart-from "${RESTART_FROM}")
 fi
 
 run_cmd python "${SCRIPT_DIR}/prepare_lammps_normal_input.py" \
-  --pdb "${STRUCTURE}" \
-  --data "${DATA_PATH}" \
-  --input "${INPUT_PATH}" \
-  --model "${MODEL_PATH}" \
-  --metadata "${METADATA_PATH}" \
-  --element-order "${ELEMENT_ORDER}" \
-  --temperature "${TEMPERATURE}" \
-  --timestep-fs "${TIMESTEP_FS}" \
-  --friction-fs-inv "${FRICTION_FS_INV}" \
-  --warmup-steps "${WARMUP_STEPS}" \
-  --steps "${STEPS}" \
-  --thermo-interval "${THERMO_INTERVAL}" \
-  --dump-interval "${DUMP_INTERVAL}" \
-  --xtc-dump-interval "${XTC_DUMP_INTERVAL}" \
-  --xtc-path "${XTC_PATH}" \
-  --seed "${SEED}" \
-  --final-data "${FINAL_DATA_PATH}" \
-  --dump "${DUMP_PATH}" \
-  "${INIT_ARGS[@]}"
+    --pdb "${STRUCTURE}" \
+    --data "${DATA_PATH}" \
+    --input "${INPUT_PATH}" \
+    --model "${MODEL_PATH}" \
+    --metadata "${METADATA_PATH}" \
+    --element-order "${ELEMENT_ORDER}" \
+    --temperature "${TEMPERATURE}" \
+    --timestep-fs "${TIMESTEP_FS}" \
+    --friction-fs-inv "${FRICTION_FS_INV}" \
+    --warmup-steps "${WARMUP_STEPS}" \
+    --steps "${STEPS}" \
+    --thermo-interval "${THERMO_INTERVAL}" \
+    --dump-interval "${DUMP_INTERVAL}" \
+    --xtc-dump-interval "${XTC_DUMP_INTERVAL}" \
+    --xtc-path "${XTC_PATH}" \
+    --seed "${SEED}" \
+    --final-data "${FINAL_DATA_PATH}" \
+    --dump "${DUMP_PATH}" \
+    --restart-interval "${RESTART_INTERVAL}" \
+    --restart-1 "${RESTART_PATH_1}" \
+    --restart-2 "${RESTART_PATH_2}" \
+    --final-restart "${FINAL_RESTART_PATH}" \
+    "${INIT_ARGS[@]}" \
+    "${RESTART_ARGS[@]}"
 
 if [[ "${RUN_MD}" != "1" ]]; then
-  echo "Prepared LAMMPS files; skipping MD because RUN_MD=${RUN_MD}."
-  exit 0
+    echo "Prepared LAMMPS files; skipping MD because RUN_MD=${RUN_MD}."
+    exit 0
 fi
 
 if [[ ! -x "${LMP_BIN}" ]]; then
-  echo "LAMMPS binary not executable: ${LMP_BIN}" >&2
-  exit 1
+    echo "LAMMPS binary not executable: ${LMP_BIN}" >&2
+    exit 1
 fi
 
-run_cmd "${LMP_BIN}" \
-  -k on g "${KOKKOS_GPUS}" \
-  -sf kk \
-  -pk kokkos newton on neigh half \
-  -in "${INPUT_PATH}" \
-  -log "${LOG_PATH}"
+if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "+ cd ${RUN_DIR}"
+    echo "+ ${LMP_BIN} -k on g ${KOKKOS_GPUS} -sf kk -pk kokkos newton on neigh half -in $(basename "${INPUT_PATH}") -log $(basename "${LOG_PATH}")"
+else
+    (
+        cd "${RUN_DIR}"
+        "${LMP_BIN}" \
+            -k on g "${KOKKOS_GPUS}" \
+            -sf kk \
+            -pk kokkos newton on neigh half \
+            -in "$(basename "${INPUT_PATH}")" \
+            -log "$(basename "${LOG_PATH}")"
+    )
+fi
 
 if [[ "${DRY_RUN}" != "1" && -f "${LOG_PATH}" ]]; then
-  python - "${LOG_PATH}" <<'PY'
+    python - "${LOG_PATH}" <<'PY'
 import re
 import sys
 
@@ -300,3 +354,10 @@ else:
     print("production_ms_per_step=unavailable")
 PY
 fi
+
+echo
+echo "RUN FINISHED"
+echo "RUN_DIR=${RUN_DIR}"
+echo "FINAL_DATA=${FINAL_DATA_PATH}"
+echo "FINAL_RESTART=${FINAL_RESTART_PATH}"
+echo "XTC=${XTC_PATH}"
