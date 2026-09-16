@@ -28,12 +28,10 @@ FRICTION_FS_INV="${FRICTION_FS_INV:-0.02}"
 THERMO_INTERVAL="${THERMO_INTERVAL:-100}"
 DUMP_INTERVAL="${DUMP_INTERVAL:-100}"
 XTC_DUMP_INTERVAL="${XTC_DUMP_INTERVAL:-500}"
+RESTART_INTERVAL="${RESTART_INTERVAL:-10000}"
 XTC_PATH="${XTC_PATH:-}"
 SEED="${SEED:-7}"
 INIT_VELOCITIES="${INIT_VELOCITIES:-1}"
-
-RESTART_FROM="${RESTART_FROM:-}"
-RESTART_INTERVAL="${RESTART_INTERVAL:-10000}"
 
 EXPORT_DEVICE="${EXPORT_DEVICE:-cpu}"
 STRICT="${STRICT:-0}"
@@ -64,10 +62,9 @@ Options:
   --thermo-interval N
   --dump-interval N
   --xtc-dump-interval N
+  --restart-interval N
   --xtc-path PATH
   --element-order LIST
-  --restart-from PATH
-  --restart-interval N
   --cuda-visible-devices IDS
   --prepare-only
   --no-run
@@ -92,10 +89,9 @@ while [[ $# -gt 0 ]]; do
         --thermo-interval) THERMO_INTERVAL="$2"; shift 2 ;;
         --dump-interval) DUMP_INTERVAL="$2"; shift 2 ;;
         --xtc-dump-interval) XTC_DUMP_INTERVAL="$2"; shift 2 ;;
+        --restart-interval) RESTART_INTERVAL="$2"; shift 2 ;;
         --xtc-path) XTC_PATH="$2"; shift 2 ;;
         --element-order) ELEMENT_ORDER="$2"; shift 2 ;;
-        --restart-from) RESTART_FROM="$2"; shift 2 ;;
-        --restart-interval) RESTART_INTERVAL="$2"; shift 2 ;;
         --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2 ;;
         --prepare-only|--no-run) RUN_MD=0; shift ;;
         --force-export) FORCE_EXPORT=1; shift ;;
@@ -126,18 +122,11 @@ if [[ ! -f "${SCRIPT_DIR}/prepare_lammps_normal_input.py" ]]; then
     exit 1
 fi
 
-if [[ -n "${RESTART_FROM}" && ! -f "${RESTART_FROM}" ]]; then
-    echo "Restart file not found: ${RESTART_FROM}" >&2
-    exit 1
+if [[ -z "${RUN_DIR}" ]]; then
+    RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps"
 fi
 
-if [[ -z "${RUN_DIR}" ]]; then
-    if [[ -n "${RESTART_FROM}" ]]; then
-        RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps-restart"
-    else
-        RUN_DIR="${RUN_ROOT}/${CONFIG_TYPE}/${RUN_STAMP}-normal-lammps"
-    fi
-fi
+RUN_DIR="$(mkdir -p "${RUN_DIR}" && cd "${RUN_DIR}" && pwd)"
 
 MODEL_PATH="${RUN_DIR}/mattertune-mattersim-normal.pt"
 DATA_PATH="${RUN_DIR}/top_normal.data"
@@ -149,16 +138,9 @@ LOG_PATH="${RUN_DIR}/log.normal.lammps"
 CONFIG_PATH="${RUN_DIR}/run_lammps_mlp_md_config.txt"
 RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
 RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
-FINAL_RESTART_PATH="${RUN_DIR}/lmp.restart.final"
 
 if [[ -z "${XTC_PATH}" ]]; then
     XTC_PATH="${RUN_DIR}/traj.xtc"
-fi
-
-if [[ -n "${RESTART_FROM}" ]]; then
-    RESTART_FROM="$(readlink -f "${RESTART_FROM}")"
-    WARMUP_STEPS=0
-    INIT_VELOCITIES=0
 fi
 
 run_cmd() {
@@ -186,8 +168,6 @@ if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
 fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then
-    mkdir -p "${RUN_DIR}"
-
     cat > "${CONFIG_PATH}" <<EOF
 created_at=$(date --iso-8601=seconds)
 checkpoint=${CKPT}
@@ -202,12 +182,8 @@ steps=${STEPS}
 thermo_interval=${THERMO_INTERVAL}
 dump_interval=${DUMP_INTERVAL}
 xtc_dump_interval=${XTC_DUMP_INTERVAL}
-xtc_path=${XTC_PATH}
-restart_from=${RESTART_FROM}
 restart_interval=${RESTART_INTERVAL}
-restart_path_1=${RESTART_PATH_1}
-restart_path_2=${RESTART_PATH_2}
-final_restart_path=${FINAL_RESTART_PATH}
+xtc_path=${XTC_PATH}
 model_path=${MODEL_PATH}
 data_path=${DATA_PATH}
 input_path=${INPUT_PATH}
@@ -215,11 +191,11 @@ metadata_path=${METADATA_PATH}
 final_data_path=${FINAL_DATA_PATH}
 dump_path=${DUMP_PATH}
 log_path=${LOG_PATH}
+restart_path_1=${RESTART_PATH_1}
+restart_path_2=${RESTART_PATH_2}
 cuda_visible_devices=${CUDA_VISIBLE_DEVICES_VALUE}
 kokkos_gpus=${KOKKOS_GPUS}
 EOF
-else
-    echo "[dry-run] would create ${RUN_DIR}"
 fi
 
 echo "RUN_DIR=${RUN_DIR}"
@@ -228,21 +204,17 @@ echo "STRUCTURE=${STRUCTURE}"
 echo "MODEL_PATH=${MODEL_PATH}"
 echo "DATA_PATH=${DATA_PATH}"
 echo "INPUT_PATH=${INPUT_PATH}"
-echo "DUMP_PATH=${DUMP_PATH}"
-echo "XTC_PATH=${XTC_PATH}"
 echo "STEPS=${STEPS}"
 echo "WARMUP_STEPS=${WARMUP_STEPS}"
-echo "RESTART_FROM=${RESTART_FROM}"
-echo "RESTART_INTERVAL=${RESTART_INTERVAL}"
-echo "FINAL_RESTART_PATH=${FINAL_RESTART_PATH}"
+echo "TIMESTEP_FS=${TIMESTEP_FS}"
+echo "TEMPERATURE=${TEMPERATURE}"
 echo "THERMO_INTERVAL=${THERMO_INTERVAL}"
 echo "DUMP_INTERVAL=${DUMP_INTERVAL}"
 echo "XTC_DUMP_INTERVAL=${XTC_DUMP_INTERVAL}"
-echo "KOKKOS_GPUS=${KOKKOS_GPUS}"
-
-if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
-    echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_VALUE}"
-fi
+echo "RESTART_INTERVAL=${RESTART_INTERVAL}"
+echo "RESTART_PATH_1=${RESTART_PATH_1}"
+echo "RESTART_PATH_2=${RESTART_PATH_2}"
+echo "XTC_PATH=${XTC_PATH}"
 
 EXPORT_ARGS=()
 
@@ -272,12 +244,6 @@ else
     INIT_ARGS+=(--no-init-velocities)
 fi
 
-RESTART_ARGS=()
-
-if [[ -n "${RESTART_FROM}" ]]; then
-    RESTART_ARGS+=(--restart-from "${RESTART_FROM}")
-fi
-
 run_cmd python "${SCRIPT_DIR}/prepare_lammps_normal_input.py" \
     --pdb "${STRUCTURE}" \
     --data "${DATA_PATH}" \
@@ -300,12 +266,10 @@ run_cmd python "${SCRIPT_DIR}/prepare_lammps_normal_input.py" \
     --restart-interval "${RESTART_INTERVAL}" \
     --restart-1 "${RESTART_PATH_1}" \
     --restart-2 "${RESTART_PATH_2}" \
-    --final-restart "${FINAL_RESTART_PATH}" \
-    "${INIT_ARGS[@]}" \
-    "${RESTART_ARGS[@]}"
+    "${INIT_ARGS[@]}"
 
 if [[ "${RUN_MD}" != "1" ]]; then
-    echo "Prepared LAMMPS files; skipping MD because RUN_MD=${RUN_MD}."
+    echo "Prepared LAMMPS files; skipping MD."
     exit 0
 fi
 
@@ -359,5 +323,6 @@ echo
 echo "RUN FINISHED"
 echo "RUN_DIR=${RUN_DIR}"
 echo "FINAL_DATA=${FINAL_DATA_PATH}"
-echo "FINAL_RESTART=${FINAL_RESTART_PATH}"
 echo "XTC=${XTC_PATH}"
+echo "RESTART_1=${RESTART_PATH_1}"
+echo "RESTART_2=${RESTART_PATH_2}"
