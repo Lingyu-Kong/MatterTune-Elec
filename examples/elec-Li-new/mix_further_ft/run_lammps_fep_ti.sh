@@ -29,12 +29,8 @@ LAMBDA_VALUE="${LAMBDA_VALUE:-0.0}"
 
 TARGET_INDICES="${TARGET_INDICES:-0}"
 
-# Empty means automatic.
-# ghost Li will always be the last atom type.
 TARGET_TYPE="${TARGET_TYPE:-}"
 
-# Allowed element order.
-# Elements absent from the current PDB will be removed automatically.
 ELEMENT_ORDER="${ELEMENT_ORDER:-Li,F,S,N,O,C,H,P}"
 
 STEPS="${STEPS:-100000}"
@@ -240,6 +236,7 @@ fi
 
 
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare_lammps_ghost_target_input.py"
+
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_lammps_fep_ti_energy_log.py"
 
 
@@ -275,6 +272,7 @@ fi
 
 
 mkdir -p "${RUN_DIR}"
+
 RUN_DIR="$(cd "${RUN_DIR}" && pwd)"
 
 
@@ -290,6 +288,7 @@ run_cmd() {
 
 
 source "${CONDA_SH}"
+
 conda activate "${CONDA_ENV}"
 
 export PYTHONNOUSERSITE=1
@@ -307,30 +306,6 @@ if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
 fi
 
 
-#
-# ----------------------------------------------------------------------
-# Detect elements actually present in this PDB.
-#
-# Example:
-#
-# requested:
-#   Li,F,S,N,O,C,H,P
-#
-# PDB contains:
-#   Li,F,S,N,O,C,H
-#
-# result:
-#   ACTIVE_ELEMENT_ORDER=Li,F,S,N,O,C,H
-#   AUTO_TARGET_TYPE=8
-#
-# If P is present:
-#   ACTIVE_ELEMENT_ORDER=Li,F,S,N,O,C,H,P
-#   AUTO_TARGET_TYPE=9
-#
-# ghost Li is always the final atom type.
-# ----------------------------------------------------------------------
-#
-
 ELEMENT_INFO="$(
     python - \
         "${STRUCTURE}" \
@@ -343,7 +318,10 @@ structure = Path(sys.argv[1])
 element_order_string = sys.argv[2]
 script_dir = sys.argv[3]
 
-sys.path.insert(0, script_dir)
+sys.path.insert(
+    0,
+    script_dir,
+)
 
 from prepare_lammps_ghost_target_input import (
     filter_element_order,
@@ -351,7 +329,9 @@ from prepare_lammps_ghost_target_input import (
     parse_pdb,
 )
 
-atoms, _ = parse_pdb(structure)
+atoms, _ = parse_pdb(
+    structure
+)
 
 requested_order = parse_element_order(
     element_order_string
@@ -362,7 +342,9 @@ active_order = filter_element_order(
     requested_order,
 )
 
-ghost_type = len(active_order) + 1
+ghost_type = (
+    len(active_order) + 1
+)
 
 print(
     ",".join(active_order),
@@ -388,11 +370,6 @@ if ! [[ "${AUTO_TARGET_TYPE}" =~ ^[0-9]+$ ]]; then
 fi
 
 
-#
-# TARGET_TYPE may still be supplied explicitly for debugging or
-# compatibility, but it must agree with the automatically detected
-# final atom type.
-#
 if [[ -n "${TARGET_TYPE}" ]]; then
     if ! [[ "${TARGET_TYPE}" =~ ^[0-9]+$ ]]; then
         echo "TARGET_TYPE must be a positive integer: ${TARGET_TYPE}" >&2
@@ -416,10 +393,6 @@ fi
 TARGET_TYPE="${AUTO_TARGET_TYPE}"
 
 
-#
-# All path names that contain TARGET_TYPE must be created only after
-# TARGET_TYPE has been determined.
-#
 MODEL_PATH="${RUN_DIR}/ghost-target-${LAMBDA_TAG}-type${TARGET_TYPE}-rc${LJ_CUTOFF}.pt"
 
 DATA_PATH="${RUN_DIR}/top_target_type${TARGET_TYPE}.data"
@@ -441,6 +414,7 @@ DUMP_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.lammpstrj"
 XTC_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.xtc"
 
 RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
+
 RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
 
 LOG_PATH="${RUN_DIR}/log.${LAMBDA_TAG}.lammps"
@@ -647,6 +621,7 @@ start_periodic_merge() {
     fi
 
     periodic_merge_loop &
+
     PERIODIC_MERGE_PID=$!
 
     echo "FEP-TI energy log auto-refresh enabled."
@@ -680,6 +655,7 @@ finalize() {
     stop_periodic_merge
 
     merge_energy_log_once
+
     merge_status=$?
 
     if (( merge_status != 0 )); then
