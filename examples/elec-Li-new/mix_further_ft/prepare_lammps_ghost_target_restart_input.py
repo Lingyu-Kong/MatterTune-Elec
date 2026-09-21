@@ -2,33 +2,484 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
 
 
-def write_lammps_restart_input(
+DEFAULT_ELEMENT_ORDER = (
+    "Li",
+    "F",
+    "S",
+    "N",
+    "O",
+    "C",
+    "H",
+    "P",
+)
+
+DEFAULT_MASSES = {
+    "Li": 6.94,
+    "F": 18.998403163,
+    "S": 32.06,
+    "N": 14.007,
+    "O": 15.999,
+    "C": 12.011,
+    "H": 1.008,
+    "P": 30.973761998,
+}
+
+
+@dataclass(frozen=True)
+class PDBAtom:
+    index: int
+    serial: int
+    name: str
+    residue: str
+    residue_id: int
+    element: str
+    x: float
+    y: float
+    z: float
+
+
+def parse_csv_ints(value: str) -> tuple[int, ...]:
+    items = tuple(
+        int(piece.strip())
+        for piece in value.split(",")
+        if piece.strip()
+    )
+
+    if not items:
+        raise argparse.ArgumentTypeError(
+            "value must contain at least one integer"
+        )
+
+    return items
+
+
+def parse_element_order(value: str) -> tuple[str, ...]:
+    order = tuple(
+        piece.strip()
+        for piece in value.split(",")
+        if piece.strip()
+    )
+
+    if not order:
+        raise argparse.ArgumentTypeError(
+            "--element-order must not be empty"
+        )
+
+    if len(set(order)) != len(order):
+        raise argparse.ArgumentTypeError(
+            "--element-order must not contain duplicates"
+        )
+
+    for element in order:
+        if element not in DEFAULT_MASSES:
+            raise argparse.ArgumentTypeError(
+                f"Unsupported element in --element-order: {element}"
+            )
+
+    return order
+
+
+def normalize_element(value: str) -> str:
+    value = value.strip()
+
+    if not value:
+        raise ValueError("Empty element")
+
+    element = value[0].upper() + value[1:].lower()
+
+    if element not in DEFAULT_MASSES:
+        raise ValueError(
+            f"Unsupported element: {element}"
+        )
+
+    return element
+
+
+def element_from_pdb_atom_name(name: str) -> str:
+    letters = "".join(
+        ch for ch in name.strip()
+        if ch.isalpha()
+    )
+
+    if not letters:
+        raise ValueError(
+            f"Cannot infer element from empty PDB atom name {name!r}"
+        )
+
+    upper = letters.upper()
+
+    if upper.startswith("LI"):
+        element = "Li"
+    else:
+        element = upper[0]
+
+    if element not in DEFAULT_MASSES:
+        raise ValueError(
+            f"Unsupported element inferred from PDB atom name "
+            f"{name!r}: {element}"
+        )
+
+    return element
+
+
+def parse_cryst1(
+    line: str,
+) -> tuple[float, float, float, float, float, float]:
+    fields = line.split()
+
+    if len(fields) < 7:
+        raise ValueError(
+            f"Malformed CRYST1 record: {line.rstrip()}"
+        )
+
+    return tuple(
+        float(value)
+        for value in fields[1:7]
+    )
+
+
+def parse_pdb(
+    path: Path,
+) -> tuple[list[PDBAtom], tuple[float, float, float]]:
+    atoms: list[PDBAtom] = []
+    cell: tuple[float, float, float] | None = None
+
+    with path.open(
+        encoding="utf-8"
+    ) as handle:
+        for line in handle:
+            record = line[:6].strip()
+
+            if record == "CRYST1":
+                (
+                    a,
+                    b,
+                    c,
+                    alpha,
+                    beta,
+                    gamma,
+                ) = parse_cryst1(line)
+
+                if any(
+                    abs(angle - 90.0) > 1e-6
+                    for angle in (alpha, beta, gamma)
+                ):
+                    raise ValueError(
+                        "Only orthorhombic PDB cells are supported "
+                        "for this LAMMPS writer; got angles "
+                        f"{(alpha, beta, gamma)}."
+                    )
+
+                cell = (a, b, c)
+
+            elif record in {
+                "ATOM",
+                "HETATM",
+            }:
+                name = line[12:16].strip()
+                residue = line[17:20].strip()
+                residue_id_text = line[22:26].strip()
+
+                element_field = (
+                    line[76:78].strip()
+                    if len(line) >= 78
+                    else ""
+                )
+
+                if element_field:
+                    element = normalize_element(
+                        element_field
+                    )
+                else:
+                    element = element_from_pdb_atom_name(
+                        name
+                    )
+
+                atom = PDBAtom(
+                    index=len(atoms),
+                    serial=int(line[6:11]),
+                    name=name,
+                    residue=residue,
+                    residue_id=(
+                        int(residue_id_text)
+                        if residue_id_text
+                        else 0
+                    ),
+                    element=element,
+                    x=float(line[30:38]),
+                    y=float(line[38:46]),
+                    z=float(line[46:54]),
+                )
+
+                atoms.append(atom)
+
+    if cell is None:
+        raise ValueError(
+            f"No CRYST1 record found in {path}"
+        )
+
+    if not atoms:
+        raise ValueError(
+            f"No atoms found in {path}"
+        )
+
+    return atoms, cell
+
+
+def wrap_position(
+    value: float,
+    length: float,
+) -> float:
+    wrapped = math.fmod(
+        value,
+        length,
+    )
+
+    if wrapped < 0.0:
+        wrapped += length
+
+    return wrapped
+
+
+def filter_element_order(
+    atoms: list[PDBAtom],
+    requested_order: tuple[str, ...],
+) -> tuple[str, ...]:
+    present_elements = {
+        atom.element
+        for atom in atoms
+    }
+
+    missing = (
+        present_elements
+        - set(requested_order)
+    )
+
+    if missing:
+        raise ValueError(
+            "PDB contains elements not present in "
+            "--element-order: "
+            + ", ".join(
+                sorted(missing)
+            )
+        )
+
+    active_order = tuple(
+        element
+        for element in requested_order
+        if element in present_elements
+    )
+
+    if not active_order:
+        raise ValueError(
+            "No valid elements found in PDB"
+        )
+
+    return active_order
+
+
+def write_lammps_data(
     *,
     path: Path,
-    restart_path: Path,
+    atoms: list[PDBAtom],
+    cell: tuple[float, float, float],
+    element_order: tuple[str, ...],
+    target_indices: tuple[int, ...],
+    target_type: int,
+) -> dict[str, object]:
+    base_types = {
+        element: i + 1
+        for i, element in enumerate(
+            element_order
+        )
+    }
+
+    target_set = set(
+        target_indices
+    )
+
+    expected_target_type = (
+        len(element_order) + 1
+    )
+
+    if target_type != expected_target_type:
+        raise ValueError(
+            f"ghost target type must be the last type: "
+            f"expected {expected_target_type}, "
+            f"got {target_type}"
+        )
+
+    n_atom_types = target_type
+
+    for atom in atoms:
+        if atom.element not in base_types:
+            raise ValueError(
+                f"Atom index {atom.index} has element "
+                f"{atom.element}, not in {element_order}."
+            )
+
+    for target_index in target_indices:
+        if (
+            target_index < 0
+            or target_index >= len(atoms)
+        ):
+            raise ValueError(
+                f"Target index {target_index} is outside "
+                f"[0, {len(atoms) - 1}]"
+            )
+
+        if atoms[target_index].element != "Li":
+            raise ValueError(
+                f"Target index {target_index} is "
+                f"{atoms[target_index].element}, expected Li."
+            )
+
+    type_elements = list(
+        element_order
+    )
+
+    type_elements.append(
+        "Li"
+    )
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write(
+            "LAMMPS data generated from PDB for "
+            "MatterSim ghost-target FEP-TI\n\n"
+        )
+
+        handle.write(
+            f"{len(atoms)} atoms\n"
+        )
+
+        handle.write(
+            f"{n_atom_types} atom types\n\n"
+        )
+
+        handle.write(
+            f"0.0 {cell[0]:.10f} xlo xhi\n"
+        )
+
+        handle.write(
+            f"0.0 {cell[1]:.10f} ylo yhi\n"
+        )
+
+        handle.write(
+            f"0.0 {cell[2]:.10f} zlo zhi\n\n"
+        )
+
+        handle.write(
+            "Masses\n\n"
+        )
+
+        for atom_type, element in enumerate(
+            type_elements,
+            start=1,
+        ):
+            handle.write(
+                f"{atom_type} "
+                f"{DEFAULT_MASSES[element]:.12g} "
+                f"# {element}\n"
+            )
+
+        handle.write(
+            "\nAtoms # atomic\n\n"
+        )
+
+        for atom in atoms:
+            atom_type = (
+                target_type
+                if atom.index in target_set
+                else base_types[
+                    atom.element
+                ]
+            )
+
+            x = wrap_position(
+                atom.x,
+                cell[0],
+            )
+
+            y = wrap_position(
+                atom.y,
+                cell[1],
+            )
+
+            z = wrap_position(
+                atom.z,
+                cell[2],
+            )
+
+            handle.write(
+                f"{atom.index + 1} "
+                f"{atom_type} "
+                f"{x:.10f} "
+                f"{y:.10f} "
+                f"{z:.10f} "
+                f"# pdb_index={atom.index} "
+                f"pdb_serial={atom.serial} "
+                f"name={atom.name} "
+                f"residue={atom.residue}{atom.residue_id}\n"
+            )
+
+    return {
+        "natoms": len(atoms),
+        "cell": cell,
+        "element_order": element_order,
+        "target_indices_zero_based": target_indices,
+        "target_lammps_ids": tuple(
+            index + 1
+            for index in target_indices
+        ),
+        "target_type": target_type,
+        "base_types": base_types,
+        "pair_coeff_elements": tuple(
+            type_elements
+        ),
+    }
+
+
+def write_lammps_input(
+    *,
+    path: Path,
+    data_path: Path,
     model_path: Path,
     pair_coeff_elements: list[str],
     temperature: float,
     timestep_fs: float,
     friction_fs_inv: float,
+    warmup_steps: int,
     steps: int,
-    steps_mode: str,
     thermo_interval: int,
     dump_interval: int,
     xtc_dump_interval: int,
     seed: int,
+    init_velocities: bool,
     final_data_path: Path,
     dump_path: Path,
     xtc_path: Path,
-    temperature_log_path: Path | None,
-    temperature_log_interval: int,
-    restart_interval: int,
-    restart_path_1: Path,
-    restart_path_2: Path,
-    restart_step_path: Path,
+    temperature_log_path: Path | None = None,
+    temperature_log_interval: int = 1,
+    restart_interval: int | None = None,
+    restart_path_1: Path = Path(
+        "lmp.restart.1"
+    ),
+    restart_path_2: Path = Path(
+        "lmp.restart.2"
+    ),
 ) -> None:
     if timestep_fs <= 0.0:
         raise ValueError(
@@ -40,29 +491,22 @@ def write_lammps_restart_input(
             "friction_fs_inv must be positive"
         )
 
-    if steps < 0:
+    if (
+        warmup_steps < 0
+        or steps < 0
+    ):
         raise ValueError(
-            "steps must be non-negative"
+            "warmup_steps and steps must be non-negative"
         )
 
-    if steps_mode not in {
-        "additional",
-        "total",
-    }:
+    if (
+        thermo_interval <= 0
+        or dump_interval <= 0
+        or xtc_dump_interval <= 0
+    ):
         raise ValueError(
-            "steps_mode must be "
-            "'additional' or 'total'"
-        )
-
-    if min(
-        thermo_interval,
-        dump_interval,
-        xtc_dump_interval,
-        restart_interval,
-    ) <= 0:
-        raise ValueError(
-            "output and restart intervals "
-            "must be positive"
+            "thermo_interval, dump_interval, "
+            "and xtc_dump_interval must be positive"
         )
 
     if (
@@ -70,14 +514,15 @@ def write_lammps_restart_input(
         and temperature_log_interval <= 0
     ):
         raise ValueError(
-            "temperature_log_interval "
-            "must be positive"
+            "temperature_log_interval must be positive"
         )
 
-    if not pair_coeff_elements:
+    if (
+        restart_interval is not None
+        and restart_interval <= 0
+    ):
         raise ValueError(
-            "pair_coeff_elements "
-            "must not be empty"
+            "restart_interval must be positive"
         )
 
     timestep_ps = (
@@ -94,19 +539,8 @@ def write_lammps_restart_input(
         pair_coeff_elements
     )
 
-    #
-    # IMPORTANT:
-    # All paths below refer to files inside the current
-    # lambda run directory. The LAMMPS input must therefore
-    # contain basenames only.
-    #
-    restart_name = (
-        restart_path.name
-    )
-
-    model_name = (
-        model_path.name
-    )
+    data_name = data_path.name
+    model_name = model_path.name
 
     final_data_name = (
         final_data_path.name
@@ -120,12 +554,6 @@ def write_lammps_restart_input(
         xtc_path.name
     )
 
-    temperature_log_name = (
-        None
-        if temperature_log_path is None
-        else temperature_log_path.name
-    )
-
     restart_name_1 = (
         restart_path_1.name
     )
@@ -134,8 +562,10 @@ def write_lammps_restart_input(
         restart_path_2.name
     )
 
-    restart_step_name = (
-        restart_step_path.name
+    temperature_log_name = (
+        None
+        if temperature_log_path is None
+        else temperature_log_path.name
     )
 
     path.parent.mkdir(
@@ -160,8 +590,8 @@ def write_lammps_restart_input(
         )
 
         handle.write(
-            f"variable        RESTART_PATH string "
-            f"{restart_name}\n"
+            f"variable        DATA_PATH string "
+            f"{data_name}\n"
         )
 
         handle.write(
@@ -174,29 +604,9 @@ def write_lammps_restart_input(
         )
 
         handle.write(
-            "read_restart    ${RESTART_PATH}\n\n"
+            "read_data       ${DATA_PATH}\n\n"
         )
 
-        #
-        # read_restart restores the absolute LAMMPS timestep.
-        #
-        # Record it before the continuation starts so the
-        # local FEP-TI energy segment can later be converted
-        # back to absolute steps.
-        #
-        handle.write(
-            "variable        fep_ti_restart_step equal step\n"
-        )
-
-        handle.write(
-            f'print           "${{fep_ti_restart_step}}" '
-            f"file {restart_step_name} "
-            "screen no\n\n"
-        )
-
-        #
-        # ML-IAP must be recreated explicitly after read_restart.
-        #
         handle.write(
             "pair_style      mliap unified "
             "${MODEL_PATH}\n"
@@ -206,6 +616,14 @@ def write_lammps_restart_input(
             f"pair_coeff      * * "
             f"{pair_coeff}\n\n"
         )
+
+        if init_velocities:
+            handle.write(
+                f"#velocity        all create "
+                f"{temperature:.12g} "
+                f"{seed} "
+                "mom yes rot yes dist gaussian\n"
+            )
 
         handle.write(
             f"timestep        "
@@ -248,10 +666,11 @@ def write_lammps_restart_input(
             handle.write(
                 f"fix             fep_ti_temp_log all print "
                 f"{temperature_log_interval} "
-                f'"${{fep_ti_log_step}},'
-                f'${{fep_ti_log_temp}}" '
-                f"append {temperature_log_name} "
-                'screen no title ""\n\n'
+                f"\"${{fep_ti_log_step}},"
+                f"${{fep_ti_log_temp}}\" "
+                f"file {temperature_log_name} "
+                "screen no "
+                "title \"step,temperature_K\"\n\n"
             )
 
         handle.write(
@@ -268,12 +687,23 @@ def write_lammps_restart_input(
             "thermo_modify   flush yes\n\n"
         )
 
-        handle.write(
-            f"restart         "
-            f"{restart_interval} "
-            f"{restart_name_1} "
-            f"{restart_name_2}\n\n"
-        )
+        if warmup_steps > 0:
+            handle.write(
+                f"run             "
+                f"{warmup_steps}\n"
+            )
+
+            handle.write(
+                "reset_timestep  0\n\n"
+            )
+
+        if restart_interval is not None:
+            handle.write(
+                f"restart         "
+                f"{restart_interval} "
+                f"{restart_name_1} "
+                f"{restart_name_2}\n\n"
+            )
 
         if steps > 0:
             handle.write(
@@ -297,20 +727,10 @@ def write_lammps_restart_input(
                 "dump_modify     xtc_traj sort id\n"
             )
 
-            if (
-                steps_mode
-                == "total"
-            ):
-                handle.write(
-                    f"run             "
-                    f"{steps} upto\n"
-                )
-
-            else:
-                handle.write(
-                    f"run             "
-                    f"{steps}\n"
-                )
+            handle.write(
+                f"run             "
+                f"{steps}\n"
+            )
 
             handle.write(
                 "undump          traj\n"
@@ -334,19 +754,20 @@ def write_lammps_restart_input(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare a LAMMPS input that continues "
-            "ghost-target FEP-TI from a restart file."
+            "Prepare LAMMPS atomic data and input for "
+            "MatterSim ghost-target FEP-TI from an "
+            "electrolyte PDB."
         )
     )
 
     parser.add_argument(
-        "--restart",
+        "--pdb",
         type=Path,
         required=True,
     )
 
     parser.add_argument(
-        "--source-metadata",
+        "--data",
         type=Path,
         required=True,
     )
@@ -370,14 +791,21 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--restart-step-file",
-        type=Path,
-        required=True,
-        help=(
-            "File where the generated LAMMPS input "
-            "writes the absolute timestep restored "
-            "by read_restart."
-        ),
+        "--target-indices",
+        type=parse_csv_ints,
+        default=(0,),
+    )
+
+    parser.add_argument(
+        "--target-type",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--element-order",
+        type=parse_element_order,
+        default=DEFAULT_ELEMENT_ORDER,
     )
 
     parser.add_argument(
@@ -389,7 +817,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timestep-fs",
         type=float,
-        default=1.0,
+        default=0.5,
     )
 
     parser.add_argument(
@@ -399,24 +827,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--steps",
+        "--warmup-steps",
         type=int,
-        default=100000,
+        default=20,
     )
 
     parser.add_argument(
-        "--steps-mode",
-        choices=(
-            "additional",
-            "total",
-        ),
-        default="total",
-        help=(
-            "total: run until the absolute production "
-            "timestep reaches --steps; "
-            "additional: run --steps more steps "
-            "from the restart."
-        ),
+        "--steps",
+        type=int,
+        default=2000000,
     )
 
     parser.add_argument(
@@ -428,7 +847,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dump-interval",
         type=int,
-        default=100,
+        default=2000,
     )
 
     parser.add_argument(
@@ -444,6 +863,19 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--init-velocities",
+        dest="init_velocities",
+        action="store_true",
+        default=True,
+    )
+
+    parser.add_argument(
+        "--no-init-velocities",
+        dest="init_velocities",
+        action="store_false",
+    )
+
+    parser.add_argument(
         "--final-data",
         type=Path,
         required=True,
@@ -451,12 +883,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--dump",
-        type=Path,
-        required=True,
-    )
-
-    parser.add_argument(
-        "--xtc-dump",
         type=Path,
         required=True,
     )
@@ -471,6 +897,12 @@ def parse_args() -> argparse.Namespace:
         "--temperature-log-interval",
         type=int,
         default=1,
+    )
+
+    parser.add_argument(
+        "--xtc-dump",
+        type=Path,
+        required=True,
     )
 
     parser.add_argument(
@@ -495,93 +927,97 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if (
+        args.target_type is not None
+        and args.target_type <= 0
+    ):
+        parser.error(
+            "--target-type must be positive"
+        )
+
+    if (
+        args.temperature_log_interval
+        <= 0
+    ):
+        parser.error(
+            "--temperature-log-interval must be positive"
+        )
+
+    if args.restart_interval <= 0:
+        parser.error(
+            "--restart-interval must be positive"
+        )
+
+    return args
 
 
 def main() -> None:
     args = parse_args()
 
-    source_metadata = json.loads(
-        args.source_metadata.read_text(
-            encoding="utf-8"
-        )
+    atoms, cell = parse_pdb(
+        args.pdb
     )
 
-    pair_coeff_elements = (
-        source_metadata.get(
-            "pair_coeff_elements"
-        )
+    requested_element_order = (
+        args.element_order
     )
 
-    if (
-        not isinstance(
-            pair_coeff_elements,
-            list,
-        )
-        or not all(
-            isinstance(
-                item,
-                str,
+    active_element_order = filter_element_order(
+        atoms,
+        requested_element_order,
+    )
+
+    expected_target_type = (
+        len(active_element_order) + 1
+    )
+
+    if args.target_type is None:
+        target_type = expected_target_type
+    else:
+        target_type = args.target_type
+
+        if target_type != expected_target_type:
+            raise ValueError(
+                f"--target-type={target_type} is inconsistent "
+                f"with this structure. "
+                f"Detected {len(active_element_order)} normal "
+                f"element types, so ghost Li must be "
+                f"type {expected_target_type}."
             )
-            for item in pair_coeff_elements
-        )
-    ):
-        raise ValueError(
-            f"{args.source_metadata} "
-            "does not contain a valid "
-            "pair_coeff_elements list"
-        )
 
-    #
-    # Do NOT use Path.resolve().
-    #
-    # The runner may pass absolute paths to this Python
-    # script, but generated LAMMPS input references must
-    # remain basename-only for portability.
-    #
-    write_lammps_restart_input(
+    metadata = write_lammps_data(
+        path=args.data,
+        atoms=atoms,
+        cell=cell,
+        element_order=active_element_order,
+        target_indices=args.target_indices,
+        target_type=target_type,
+    )
+
+    write_lammps_input(
         path=args.input,
-        restart_path=args.restart,
+        data_path=args.data,
         model_path=args.model,
-        pair_coeff_elements=(
-            pair_coeff_elements
+        pair_coeff_elements=list(
+            metadata[
+                "pair_coeff_elements"
+            ]
         ),
-        temperature=(
-            args.temperature
-        ),
-        timestep_fs=(
-            args.timestep_fs
-        ),
-        friction_fs_inv=(
-            args.friction_fs_inv
-        ),
-        steps=(
-            args.steps
-        ),
-        steps_mode=(
-            args.steps_mode
-        ),
-        thermo_interval=(
-            args.thermo_interval
-        ),
-        dump_interval=(
-            args.dump_interval
-        ),
-        xtc_dump_interval=(
-            args.xtc_dump_interval
-        ),
-        seed=(
-            args.seed
-        ),
-        final_data_path=(
-            args.final_data
-        ),
-        dump_path=(
-            args.dump
-        ),
-        xtc_path=(
-            args.xtc_dump
-        ),
+        temperature=args.temperature,
+        timestep_fs=args.timestep_fs,
+        friction_fs_inv=args.friction_fs_inv,
+        warmup_steps=args.warmup_steps,
+        steps=args.steps,
+        thermo_interval=args.thermo_interval,
+        dump_interval=args.dump_interval,
+        xtc_dump_interval=args.xtc_dump_interval,
+        seed=args.seed,
+        init_velocities=args.init_velocities,
+        final_data_path=args.final_data,
+        dump_path=args.dump,
+        xtc_path=args.xtc_dump,
         temperature_log_path=(
             args.temperature_log
         ),
@@ -597,26 +1033,29 @@ def main() -> None:
         restart_path_2=(
             args.restart_path_2
         ),
-        restart_step_path=(
-            args.restart_step_file
-        ),
+    )
+
+    present_elements = tuple(
+        sorted(
+            {
+                atom.element
+                for atom in atoms
+            }
+        )
     )
 
     payload = {
-        "restart": str(
-            args.restart
+        "pdb": str(
+            args.pdb
         ),
-        "source_metadata": str(
-            args.source_metadata
+        "data": str(
+            args.data
         ),
         "input": str(
             args.input
         ),
         "model": str(
             args.model
-        ),
-        "restart_step_file": str(
-            args.restart_step_file
         ),
         "temperature": (
             args.temperature
@@ -627,11 +1066,11 @@ def main() -> None:
         "friction_fs_inv": (
             args.friction_fs_inv
         ),
+        "warmup_steps": (
+            args.warmup_steps
+        ),
         "steps": (
             args.steps
-        ),
-        "steps_mode": (
-            args.steps_mode
         ),
         "thermo_interval": (
             args.thermo_interval
@@ -645,8 +1084,8 @@ def main() -> None:
         "seed": (
             args.seed
         ),
-        "final_data": str(
-            args.final_data
+        "init_velocities": (
+            args.init_velocities
         ),
         "dump": str(
             args.dump
@@ -673,9 +1112,18 @@ def main() -> None:
         "restart_path_2": str(
             args.restart_path_2
         ),
-        "pair_coeff_elements": (
-            pair_coeff_elements
+        "requested_element_order": (
+            requested_element_order
         ),
+        "present_elements": (
+            present_elements
+        ),
+        "active_element_order": (
+            active_element_order
+        ),
+        "ghost_element": "Li",
+        "ghost_type": target_type,
+        **metadata,
     }
 
     args.metadata.parent.mkdir(
@@ -692,6 +1140,10 @@ def main() -> None:
     )
 
     print(
+        f"wrote {args.data}"
+    )
+
+    print(
         f"wrote {args.input}"
     )
 
@@ -700,16 +1152,35 @@ def main() -> None:
     )
 
     print(
-        f"restart={args.restart}"
+        "present_elements="
+        + ",".join(
+            present_elements
+        )
     )
 
     print(
-        "restart_step_file="
-        f"{args.restart_step_file}"
+        "active_element_order="
+        + ",".join(
+            active_element_order
+        )
     )
 
     print(
-        f"xtc_dump={args.xtc_dump}"
+        f"normal_atom_types="
+        f"{len(active_element_order)}"
+    )
+
+    print(
+        f"ghost_type={target_type}"
+    )
+
+    print(
+        "pair_coeff * * "
+        + " ".join(
+            metadata[
+                "pair_coeff_elements"
+            ]
+        )
     )
 
 
