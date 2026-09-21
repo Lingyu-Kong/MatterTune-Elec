@@ -28,9 +28,14 @@ RUN_DIR="${RUN_DIR:-}"
 LAMBDA_VALUE="${LAMBDA_VALUE:-0.0}"
 
 TARGET_INDICES="${TARGET_INDICES:-0}"
-TARGET_TYPE="${TARGET_TYPE:-8}"
 
-ELEMENT_ORDER="${ELEMENT_ORDER:-Li,F,S,N,O,C,H}"
+# Empty means automatic.
+# ghost Li will always be the last atom type.
+TARGET_TYPE="${TARGET_TYPE:-}"
+
+# Allowed element order.
+# Elements absent from the current PDB will be removed automatically.
+ELEMENT_ORDER="${ELEMENT_ORDER:-Li,F,S,N,O,C,H,P}"
 
 STEPS="${STEPS:-100000}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
@@ -66,12 +71,6 @@ CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES_VALUE:-${CUDA_VISIBLE_DEVICES
 DRY_RUN="${DRY_RUN:-0}"
 RUN_MD="${RUN_MD:-1}"
 
-#
-# Internal implementation detail.
-#
-# Canonical FEP-TI logs are refreshed every two minutes while MD is running.
-# This is intentionally not exposed as a user option.
-#
 PERIODIC_MERGE_SECONDS=120
 PERIODIC_MERGE_PID=""
 
@@ -95,6 +94,8 @@ Common options:
   --friction-fs-inv VALUE
   --energy-log-interval N
   --target-indices LIST
+  --target-type N
+  --element-order LIST
   --lj-cutoff A
   --cuda-visible-devices IDS
   --prepare-only
@@ -157,6 +158,16 @@ while [[ $# -gt 0 ]]; do
 
         --target-indices)
             TARGET_INDICES="$2"
+            shift 2
+            ;;
+
+        --target-type)
+            TARGET_TYPE="$2"
+            shift 2
+            ;;
+
+        --element-order)
+            ELEMENT_ORDER="$2"
             shift 2
             ;;
 
@@ -267,34 +278,6 @@ mkdir -p "${RUN_DIR}"
 RUN_DIR="$(cd "${RUN_DIR}" && pwd)"
 
 
-MODEL_PATH="${RUN_DIR}/ghost-target-${LAMBDA_TAG}-type${TARGET_TYPE}-rc${LJ_CUTOFF}.pt"
-
-DATA_PATH="${RUN_DIR}/top_target_type${TARGET_TYPE}.data"
-
-INPUT_PATH="${RUN_DIR}/in.${LAMBDA_TAG}.lammps"
-
-METADATA_PATH="${RUN_DIR}/prepare_metadata.json"
-
-ENERGY_LOG_PATH="${RUN_DIR}/fep-ti-energy.log"
-
-ENERGY_LOG_RAW_PATH="${RUN_DIR}/fep-ti-energy.raw.csv"
-
-TEMPERATURE_LOG_PATH="${RUN_DIR}/fep-ti-temperature.csv"
-
-FINAL_DATA_PATH="${RUN_DIR}/final_${LAMBDA_TAG}.data"
-
-DUMP_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.lammpstrj"
-
-XTC_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.xtc"
-
-RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
-RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
-
-LOG_PATH="${RUN_DIR}/log.${LAMBDA_TAG}.lammps"
-
-CONFIG_PATH="${RUN_DIR}/run_lammps_fep_ti_config.txt"
-
-
 run_cmd() {
     printf '+'
     printf ' %q' "$@"
@@ -324,6 +307,147 @@ if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
 fi
 
 
+#
+# ----------------------------------------------------------------------
+# Detect elements actually present in this PDB.
+#
+# Example:
+#
+# requested:
+#   Li,F,S,N,O,C,H,P
+#
+# PDB contains:
+#   Li,F,S,N,O,C,H
+#
+# result:
+#   ACTIVE_ELEMENT_ORDER=Li,F,S,N,O,C,H
+#   AUTO_TARGET_TYPE=8
+#
+# If P is present:
+#   ACTIVE_ELEMENT_ORDER=Li,F,S,N,O,C,H,P
+#   AUTO_TARGET_TYPE=9
+#
+# ghost Li is always the final atom type.
+# ----------------------------------------------------------------------
+#
+
+ELEMENT_INFO="$(
+    python - \
+        "${STRUCTURE}" \
+        "${ELEMENT_ORDER}" \
+        "${SCRIPT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+structure = Path(sys.argv[1])
+element_order_string = sys.argv[2]
+script_dir = sys.argv[3]
+
+sys.path.insert(0, script_dir)
+
+from prepare_lammps_ghost_target_input import (
+    filter_element_order,
+    parse_element_order,
+    parse_pdb,
+)
+
+atoms, _ = parse_pdb(structure)
+
+requested_order = parse_element_order(
+    element_order_string
+)
+
+active_order = filter_element_order(
+    atoms,
+    requested_order,
+)
+
+ghost_type = len(active_order) + 1
+
+print(
+    ",".join(active_order),
+    ghost_type,
+    sep="\t",
+)
+PY
+)"
+
+
+IFS=$'\t' read -r ACTIVE_ELEMENT_ORDER AUTO_TARGET_TYPE <<< "${ELEMENT_INFO}"
+
+
+if [[ -z "${ACTIVE_ELEMENT_ORDER}" ]]; then
+    echo "Failed to determine active element order." >&2
+    exit 1
+fi
+
+
+if ! [[ "${AUTO_TARGET_TYPE}" =~ ^[0-9]+$ ]]; then
+    echo "Failed to determine ghost target type." >&2
+    exit 1
+fi
+
+
+#
+# TARGET_TYPE may still be supplied explicitly for debugging or
+# compatibility, but it must agree with the automatically detected
+# final atom type.
+#
+if [[ -n "${TARGET_TYPE}" ]]; then
+    if ! [[ "${TARGET_TYPE}" =~ ^[0-9]+$ ]]; then
+        echo "TARGET_TYPE must be a positive integer: ${TARGET_TYPE}" >&2
+        exit 1
+    fi
+
+    if (( TARGET_TYPE <= 0 )); then
+        echo "TARGET_TYPE must be positive: ${TARGET_TYPE}" >&2
+        exit 1
+    fi
+
+    if [[ "${TARGET_TYPE}" != "${AUTO_TARGET_TYPE}" ]]; then
+        echo "ERROR: supplied TARGET_TYPE=${TARGET_TYPE} does not match detected ghost type." >&2
+        echo "ACTIVE_ELEMENT_ORDER=${ACTIVE_ELEMENT_ORDER}" >&2
+        echo "AUTO_TARGET_TYPE=${AUTO_TARGET_TYPE}" >&2
+        exit 1
+    fi
+fi
+
+
+TARGET_TYPE="${AUTO_TARGET_TYPE}"
+
+
+#
+# All path names that contain TARGET_TYPE must be created only after
+# TARGET_TYPE has been determined.
+#
+MODEL_PATH="${RUN_DIR}/ghost-target-${LAMBDA_TAG}-type${TARGET_TYPE}-rc${LJ_CUTOFF}.pt"
+
+DATA_PATH="${RUN_DIR}/top_target_type${TARGET_TYPE}.data"
+
+INPUT_PATH="${RUN_DIR}/in.${LAMBDA_TAG}.lammps"
+
+METADATA_PATH="${RUN_DIR}/prepare_metadata.json"
+
+ENERGY_LOG_PATH="${RUN_DIR}/fep-ti-energy.log"
+
+ENERGY_LOG_RAW_PATH="${RUN_DIR}/fep-ti-energy.raw.csv"
+
+TEMPERATURE_LOG_PATH="${RUN_DIR}/fep-ti-temperature.csv"
+
+FINAL_DATA_PATH="${RUN_DIR}/final_${LAMBDA_TAG}.data"
+
+DUMP_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.lammpstrj"
+
+XTC_PATH="${RUN_DIR}/traj_${LAMBDA_TAG}.xtc"
+
+RESTART_PATH_1="${RUN_DIR}/lmp.restart.1"
+RESTART_PATH_2="${RUN_DIR}/lmp.restart.2"
+
+LOG_PATH="${RUN_DIR}/log.${LAMBDA_TAG}.lammps"
+
+CONFIG_PATH="${RUN_DIR}/run_lammps_fep_ti_config.txt"
+
+
 if [[ "${DRY_RUN}" != "1" ]]; then
     cat > "${CONFIG_PATH}" <<EOF
 created_at=$(date --iso-8601=seconds)
@@ -333,7 +457,8 @@ run_dir=.
 lambda_value=${LAMBDA_VALUE}
 target_indices_zero_based=${TARGET_INDICES}
 target_type=${TARGET_TYPE}
-element_order=${ELEMENT_ORDER}
+requested_element_order=${ELEMENT_ORDER}
+element_order=${ACTIVE_ELEMENT_ORDER}
 temperature=${TEMPERATURE}
 timestep_fs=${TIMESTEP_FS}
 friction_fs_inv=${FRICTION_FS_INV}
@@ -368,9 +493,13 @@ fi
 echo "RUN_DIR=${RUN_DIR}"
 echo "LAMBDA_VALUE=${LAMBDA_VALUE}"
 echo "TARGET_INDICES=${TARGET_INDICES}"
+echo "REQUESTED_ELEMENT_ORDER=${ELEMENT_ORDER}"
+echo "ACTIVE_ELEMENT_ORDER=${ACTIVE_ELEMENT_ORDER}"
 echo "TARGET_TYPE=${TARGET_TYPE}"
 echo "CKPT=${CKPT}"
 echo "STRUCTURE=${STRUCTURE}"
+echo "MODEL_PATH=${MODEL_PATH}"
+echo "DATA_PATH=${DATA_PATH}"
 echo "DUMP_PATH=${DUMP_PATH}"
 echo "XTC_PATH=${XTC_PATH}"
 
@@ -443,7 +572,7 @@ run_cmd \
     --metadata "${METADATA_PATH}" \
     --target-indices "${TARGET_INDICES}" \
     --target-type "${TARGET_TYPE}" \
-    --element-order "${ELEMENT_ORDER}" \
+    --element-order "${ACTIVE_ELEMENT_ORDER}" \
     --temperature "${TEMPERATURE}" \
     --timestep-fs "${TIMESTEP_FS}" \
     --friction-fs-inv "${FRICTION_FS_INV}" \
