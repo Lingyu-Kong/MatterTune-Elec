@@ -7,7 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_ELEMENT_ORDER = ("Li", "F", "S", "N", "O", "C", "H")
+DEFAULT_ELEMENT_ORDER = (
+    "Li",
+    "F",
+    "S",
+    "N",
+    "O",
+    "C",
+    "H",
+    "P",
+)
 
 DEFAULT_MASSES = {
     "Li": 6.94,
@@ -17,6 +26,7 @@ DEFAULT_MASSES = {
     "O": 15.999,
     "C": 12.011,
     "H": 1.008,
+    "P": 30.973761998,
 }
 
 
@@ -74,6 +84,22 @@ def parse_element_order(value: str) -> tuple[str, ...]:
     return order
 
 
+def normalize_element(value: str) -> str:
+    value = value.strip()
+
+    if not value:
+        raise ValueError("Empty element")
+
+    element = value[0].upper() + value[1:].lower()
+
+    if element not in DEFAULT_MASSES:
+        raise ValueError(
+            f"Unsupported element: {element}"
+        )
+
+    return element
+
+
 def element_from_pdb_atom_name(name: str) -> str:
     letters = "".join(
         ch for ch in name.strip()
@@ -88,9 +114,9 @@ def element_from_pdb_atom_name(name: str) -> str:
     upper = letters.upper()
 
     if upper.startswith("LI"):
-        return "Li"
-
-    element = upper[0]
+        element = "Li"
+    else:
+        element = upper[0]
 
     if element not in DEFAULT_MASSES:
         raise ValueError(
@@ -159,6 +185,21 @@ def parse_pdb(
                 residue = line[17:20].strip()
                 residue_id_text = line[22:26].strip()
 
+                element_field = (
+                    line[76:78].strip()
+                    if len(line) >= 78
+                    else ""
+                )
+
+                if element_field:
+                    element = normalize_element(
+                        element_field
+                    )
+                else:
+                    element = element_from_pdb_atom_name(
+                        name
+                    )
+
                 atom = PDBAtom(
                     index=len(atoms),
                     serial=int(line[6:11]),
@@ -169,9 +210,7 @@ def parse_pdb(
                         if residue_id_text
                         else 0
                     ),
-                    element=element_from_pdb_atom_name(
-                        name
-                    ),
+                    element=element,
                     x=float(line[30:38]),
                     y=float(line[38:46]),
                     z=float(line[46:54]),
@@ -207,6 +246,43 @@ def wrap_position(
     return wrapped
 
 
+def filter_element_order(
+    atoms: list[PDBAtom],
+    requested_order: tuple[str, ...],
+) -> tuple[str, ...]:
+    present_elements = {
+        atom.element
+        for atom in atoms
+    }
+
+    missing = (
+        present_elements
+        - set(requested_order)
+    )
+
+    if missing:
+        raise ValueError(
+            "PDB contains elements not present in "
+            "--element-order: "
+            + ", ".join(
+                sorted(missing)
+            )
+        )
+
+    active_order = tuple(
+        element
+        for element in requested_order
+        if element in present_elements
+    )
+
+    if not active_order:
+        raise ValueError(
+            "No valid elements found in PDB"
+        )
+
+    return active_order
+
+
 def write_lammps_data(
     *,
     path: Path,
@@ -227,16 +303,18 @@ def write_lammps_data(
         target_indices
     )
 
-    n_atom_types = max(
-        len(element_order),
-        target_type,
+    expected_target_type = (
+        len(element_order) + 1
     )
 
-    if target_type in base_types.values():
+    if target_type != expected_target_type:
         raise ValueError(
-            f"target_type={target_type} overlaps with "
-            f"base element types {base_types}."
+            f"ghost target type must be the last type: "
+            f"expected {expected_target_type}, "
+            f"got {target_type}"
         )
+
+    n_atom_types = target_type
 
     for atom in atoms:
         if atom.element not in base_types:
@@ -261,33 +339,13 @@ def write_lammps_data(
                 f"{atoms[target_index].element}, expected Li."
             )
 
-    type_elements: list[str] = []
+    type_elements = list(
+        element_order
+    )
 
-    for atom_type in range(
-        1,
-        n_atom_types + 1,
-    ):
-        if atom_type == target_type:
-            type_elements.append(
-                "Li"
-            )
-
-        elif (
-            1
-            <= atom_type
-            <= len(element_order)
-        ):
-            type_elements.append(
-                element_order[
-                    atom_type - 1
-                ]
-            )
-
-        else:
-            raise ValueError(
-                f"No element mapping for LAMMPS atom type "
-                f"{atom_type}"
-            )
+    type_elements.append(
+        "Li"
+    )
 
     path.parent.mkdir(
         parents=True,
@@ -388,7 +446,9 @@ def write_lammps_data(
         ),
         "target_type": target_type,
         "base_types": base_types,
-        "pair_coeff_elements": type_elements,
+        "pair_coeff_elements": tuple(
+            type_elements
+        ),
     }
 
 
@@ -479,11 +539,6 @@ def write_lammps_input(
         pair_coeff_elements
     )
 
-    #
-    # IMPORTANT:
-    # All files below are run-local files.
-    # Write only the basename into the LAMMPS input.
-    #
     data_name = data_path.name
     model_name = model_path.name
 
@@ -744,7 +799,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-type",
         type=int,
-        default=8,
+        default=None,
     )
 
     parser.add_argument(
@@ -874,7 +929,10 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    if args.target_type <= 0:
+    if (
+        args.target_type is not None
+        and args.target_type <= 0
+    ):
         parser.error(
             "--target-type must be positive"
         )
@@ -902,22 +960,42 @@ def main() -> None:
         args.pdb
     )
 
+    requested_element_order = (
+        args.element_order
+    )
+
+    active_element_order = filter_element_order(
+        atoms,
+        requested_element_order,
+    )
+
+    expected_target_type = (
+        len(active_element_order) + 1
+    )
+
+    if args.target_type is None:
+        target_type = expected_target_type
+    else:
+        target_type = args.target_type
+
+        if target_type != expected_target_type:
+            raise ValueError(
+                f"--target-type={target_type} is inconsistent "
+                f"with this structure. "
+                f"Detected {len(active_element_order)} normal "
+                f"element types, so ghost Li must be "
+                f"type {expected_target_type}."
+            )
+
     metadata = write_lammps_data(
         path=args.data,
         atoms=atoms,
         cell=cell,
-        element_order=args.element_order,
+        element_order=active_element_order,
         target_indices=args.target_indices,
-        target_type=args.target_type,
+        target_type=target_type,
     )
 
-    #
-    # Do NOT use Path.resolve() here.
-    #
-    # The Python orchestration may use absolute paths,
-    # but the generated LAMMPS input must contain only
-    # basename references to run-local files.
-    #
     write_lammps_input(
         path=args.input,
         data_path=args.data,
@@ -955,6 +1033,15 @@ def main() -> None:
         restart_path_2=(
             args.restart_path_2
         ),
+    )
+
+    present_elements = tuple(
+        sorted(
+            {
+                atom.element
+                for atom in atoms
+            }
+        )
     )
 
     payload = {
@@ -1025,6 +1112,17 @@ def main() -> None:
         "restart_path_2": str(
             args.restart_path_2
         ),
+        "requested_element_order": (
+            requested_element_order
+        ),
+        "present_elements": (
+            present_elements
+        ),
+        "active_element_order": (
+            active_element_order
+        ),
+        "ghost_element": "Li",
+        "ghost_type": target_type,
         **metadata,
     }
 
@@ -1051,6 +1149,29 @@ def main() -> None:
 
     print(
         f"wrote {args.metadata}"
+    )
+
+    print(
+        "present_elements="
+        + ",".join(
+            present_elements
+        )
+    )
+
+    print(
+        "active_element_order="
+        + ",".join(
+            active_element_order
+        )
+    )
+
+    print(
+        f"normal_atom_types="
+        f"{len(active_element_order)}"
+    )
+
+    print(
+        f"ghost_type={target_type}"
     )
 
     print(
